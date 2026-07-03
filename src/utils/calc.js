@@ -137,26 +137,12 @@ export const avatarColor = (name) => {
 
 export const initials = (name) => name.split(' ').map(p => p[0]).slice(0, 2).join('').toUpperCase();
 
-// Future value of a monthly SIP stream that runs for `totalMonths`, stepping up
-// on each 12-month anniversary of the goal's start (NOT on the calendar new year).
-// e.g. a goal started 12 Jun 2026 keeps SIP flat Jun 2026→May 2027, steps up in
-// Jun 2027, steps up again Jun 2028, and so on.
-export function fvOfSipStream(startSip, totalMonths, monthlyR, incRate) {
-  if (startSip <= 0 || totalMonths <= 0) return 0;
-  let bal = 0;
-  let sip = startSip;
-  for (let m = 0; m < totalMonths; m++) {
-    if (m > 0 && m % 12 === 0) sip = sip * (1 + incRate); // anniversary step-up
-    bal = (bal + sip) * (1 + monthlyR);
-  }
-  return bal;
-}
-
 // Re-base the plan to the most recent logged actual ("Create Log") value.
-// From that date onward the corpus starts at the actual amount and the remaining
-// SIP/projection are recomputed — so logged values actually move the numbers, not
-// just the chart. Inflation of the goal cost stays anchored to the creation date.
-// Returns the effective start month/year and starting corpus.
+// The projection GRID always starts at the goal's creation date (see
+// buildProjection below) — only the running BALANCE gets corrected: at the
+// exact month a logged actual falls in, the balance snaps to that value and
+// compounding continues from there. Inflation of the goal cost stays anchored
+// to the creation date. Returns the anchor month/year/value for that snap.
 export function goalAnchor(goal) {
   const createdM = goal.createdMonth || CURRENT_MONTH;
   const createdY = goal.createdYear || CURRENT_YEAR;
@@ -178,97 +164,139 @@ export function goalAnchor(goal) {
   return { anchorM: createdM, anchorY: createdY, anchorInv: Number(goal.currentInv) || 0, rebased: false };
 }
 
+// Lean month-by-month simulation that returns only the final closing balance
+// (no row objects) — used for calcGoal's projected corpus and for the SIP
+// binary search, where it may run dozens of times per call. The grid always
+// starts at the goal's CREATION month and steps the SIP up on each creation
+// anniversary; if a "Create Log" actual exists, the balance snaps to it at
+// the exact month it was recorded, then compounding resumes from there.
+function finalBalance(goal, sipOverride) {
+  const createdM = goal.createdMonth || CURRENT_MONTH;
+  const createdY = goal.createdYear || CURRENT_YEAR;
+  const tgtM = goal.targetMonth || 1;
+  const tgtY = goal.targetYear || CURRENT_YEAR;
+  const totalMonths = Math.max(0, monthsBetween(createdM, createdY, tgtM, tgtY));
+  if (totalMonths === 0) return Number(goal.currentInv) || 0;
+
+  const monthlyR = (Number(goal.expectedReturn) || 0) / 100 / 12;
+  const incRate = (Number(goal.sipIncRate) || 0) / 100;
+  const baseAbs = createdY * 12 + (createdM - 1);
+  const { anchorM, anchorY, anchorInv, rebased } = goalAnchor(goal);
+  const anchorAbs = rebased ? anchorY * 12 + (anchorM - 1) : null;
+  const startSip = sipOverride !== undefined ? sipOverride : (Number(goal.currentSip) || 0);
+
+  let bal = Number(goal.currentInv) || 0;
+  const numPeriods = Math.ceil(totalMonths / 12);
+  for (let k = 0; k < numPeriods; k++) {
+    const sip = startSip * Math.pow(1 + incRate, k);
+    const periodEnd = Math.min((k + 1) * 12, totalMonths);
+    for (let i = k * 12; i < periodEnd; i++) {
+      const mAbs = baseAbs + i;
+      if (anchorAbs !== null && mAbs === anchorAbs) bal = anchorInv;
+      bal = (bal + sip) * (1 + monthlyR);
+    }
+  }
+  return bal;
+}
+
 export function calcGoal(goal) {
   const createdM = goal.createdMonth || CURRENT_MONTH;
   const createdY = goal.createdYear || CURRENT_YEAR;
   const tgtM = goal.targetMonth || 1;
   const tgtY = goal.targetYear || CURRENT_YEAR;
-  // Full horizon (creation → target) inflates the goal cost; remaining horizon
-  // (anchor → target) grows the corpus & SIP so logged actuals re-base the plan.
-  const inflationMonths = Math.max(0, monthsBetween(createdM, createdY, tgtM, tgtY));
-  const { anchorM, anchorY, anchorInv, rebased } = goalAnchor(goal);
-  const months = Math.max(0, monthsBetween(anchorM, anchorY, tgtM, tgtY));
+  const months = Math.max(0, monthsBetween(createdM, createdY, tgtM, tgtY));
   const years = months / 12;
   const amount = Number(goal.amount) || 0;
   const inflation = (Number(goal.inflation) || 0) / 100;
-  const r = (Number(goal.expectedReturn) || 0) / 100;
-  const incRate = (Number(goal.sipIncRate) || 0) / 100;
-  const currentInv = anchorInv;
-  const currentSip = Number(goal.currentSip) || 0;
-  const monthlyR = r / 12;
   const monthlyInfl = Math.pow(1 + inflation, 1 / 12) - 1;
+  const futureValue = amount * Math.pow(1 + monthlyInfl, months);
 
-  const futureValue = amount * Math.pow(1 + monthlyInfl, inflationMonths);
-  const fvOfCurrentInv = currentInv * Math.pow(1 + monthlyR, months);
-  const fvOfCurrentSip = fvOfSipStream(currentSip, months, monthlyR, incRate);
-
-  const projectedCorpus = fvOfCurrentInv + fvOfCurrentSip;
+  // Projected corpus = same month-by-month simulation the projection table
+  // uses, so the summary tiles and the table always agree exactly.
+  const projectedCorpus = finalBalance(goal);
   const shortfall = Math.max(0, futureValue - projectedCorpus);
   const achievementPct = futureValue > 0 ? Math.min(100, (projectedCorpus / futureValue) * 100) : 100;
 
   let sipRequired = 0;
-  if (months > 0) {
-    const sipTargetFV = Math.max(0, futureValue - fvOfCurrentInv);
-    if (sipTargetFV > 0) {
+  if (months > 0 && futureValue > 0) {
+    const zeroSipClosing = finalBalance(goal, 0);
+    if (futureValue > zeroSipClosing) {
       let lo = 0;
-      let hi = Math.max(sipTargetFV, 1);
-      while (fvOfSipStream(hi, months, monthlyR, incRate) < sipTargetFV) {
+      let hi = Math.max(futureValue, 1);
+      while (finalBalance(goal, hi) < futureValue) {
         hi *= 2;
         if (hi > 1e15) break;
       }
-      for (let i = 0; i < 80; i++) {
+      for (let i = 0; i < 60; i++) {
         const mid = (lo + hi) / 2;
-        const fv = fvOfSipStream(mid, months, monthlyR, incRate);
-        if (fv < sipTargetFV) lo = mid; else hi = mid;
+        if (finalBalance(goal, mid) < futureValue) lo = mid; else hi = mid;
       }
       sipRequired = (lo + hi) / 2;
     }
   }
 
-  const lumpSumRequired = months > 0
-    ? Math.max(0, futureValue / Math.pow(1 + monthlyR, months) - currentInv)
-    : Math.max(0, futureValue - currentInv);
+  // Lump-sum equivalent: how much would need to be invested TODAY (at the anchor
+  // — the latest logged actual, or goal creation if none) to hit the future
+  // value on its own, on top of the anchor corpus already in place.
+  const { anchorM, anchorY, anchorInv, rebased } = goalAnchor(goal);
+  const remainingMonths = Math.max(0, monthsBetween(anchorM, anchorY, tgtM, tgtY));
+  const monthlyR = (Number(goal.expectedReturn) || 0) / 100 / 12;
+  const lumpSumRequired = remainingMonths > 0
+    ? Math.max(0, futureValue / Math.pow(1 + monthlyR, remainingMonths) - anchorInv)
+    : Math.max(0, futureValue - anchorInv);
 
   // Signed difference: positive => more SIP needed, negative => over-funded (extra SIP mapped)
+  const currentSip = Number(goal.currentSip) || 0;
   const additionalSip = sipRequired - currentSip;
   const sipOnTrack = currentSip >= sipRequired - 0.5;
 
-  return { months, years, futureValue, projectedCorpus, shortfall, achievementPct, sipRequired, additionalSip, sipOnTrack, lumpSumRequired, fvOfCurrentInv, fvOfCurrentSip, rebased, anchorInv, anchorMonth: anchorM, anchorYear: anchorY };
+  return { months, years, futureValue, projectedCorpus, shortfall, achievementPct, sipRequired, additionalSip, sipOnTrack, lumpSumRequired, rebased, anchorInv, anchorMonth: anchorM, anchorYear: anchorY };
 }
 
 // Year-by-year projection where each row is a 12-month window anchored to the
-// goal's start (anniversary) month — e.g. a goal started Jun 2026 yields rows
-// Jun 2026→Jun 2027, Jun 2027→Jun 2028, … The final row may be a partial period
-// if the target date isn't a whole number of years away. SIP steps up on each
-// anniversary, staying consistent with fvOfSipStream / calcGoal.
+// goal's CREATION month — e.g. a goal created 14 Jun 2025 always begins its
+// table at "Jun 2025 – Jun 2026", then "Jun 2026 – Jun 2027", and so on, all
+// the way to the target — regardless of any logged actuals. The SIP steps up
+// on each anniversary of creation. If a "Create Log" actual exists, the
+// running balance snaps to it at the exact month it was recorded (so the
+// table's later rows reflect reality), then compounding resumes from there —
+// the row grid itself never shifts. The final row may be partial if the
+// target date isn't a whole number of years from creation.
 export function buildProjection(goal, sipOverride) {
-  // Anchor to the latest logged actual (if any) so the projection reflects reality.
-  const { anchorM: startM, anchorY: startY, anchorInv } = goalAnchor(goal);
+  const createdM = goal.createdMonth || CURRENT_MONTH;
+  const createdY = goal.createdYear || CURRENT_YEAR;
   const tgtM = goal.targetMonth || 1;
   const tgtY = goal.targetYear;
-  const totalMonths = Math.max(0, monthsBetween(startM, startY, tgtM, tgtY));
-  const monthlyR = (goal.expectedReturn / 100) / 12;
-  const incRate = goal.sipIncRate / 100;
+  const totalMonths = Math.max(0, monthsBetween(createdM, createdY, tgtM, tgtY));
   const rows = [];
-
   if (totalMonths === 0) return rows;
 
-  const baseAbs = startY * 12 + (startM - 1); // absolute month index of the start
-  const startBal = anchorInv;
+  const monthlyR = (goal.expectedReturn / 100) / 12;
+  const incRate = goal.sipIncRate / 100;
+  const baseAbs = createdY * 12 + (createdM - 1); // absolute month index of creation
+  const { anchorM, anchorY, anchorInv, rebased } = goalAnchor(goal);
+  const anchorAbs = rebased ? anchorY * 12 + (anchorM - 1) : null;
   const startSip = sipOverride !== undefined ? sipOverride : (Number(goal.currentSip) || 0);
-  let bal = startBal;
-  let invested = startBal;
+
+  let bal = Number(goal.currentInv) || 0;
+  let invested = bal;
 
   const numPeriods = Math.ceil(totalMonths / 12);
   for (let k = 0; k < numPeriods; k++) {
-    const sip = startSip * Math.pow(1 + incRate, k); // stepped up on each anniversary
+    const sip = startSip * Math.pow(1 + incRate, k); // stepped up on each creation anniversary
     const periodStart = k * 12;
     const periodEnd = Math.min((k + 1) * 12, totalMonths);
     const monthsInRow = periodEnd - periodStart;
 
+    // If the logged actual falls exactly on this row's boundary (the common
+    // case — advisors typically log at/near an anniversary), show the
+    // corrected opening balance rather than the pre-correction one.
+    if (anchorAbs !== null && anchorAbs === baseAbs + periodStart) bal = anchorInv;
     const openingBal = bal;
     let rowContribution = 0;
     for (let i = 0; i < monthsInRow; i++) {
+      const mAbs = baseAbs + periodStart + i;
+      if (anchorAbs !== null && mAbs === anchorAbs) bal = anchorInv; // snap to the logged actual
       bal = (bal + sip) * (1 + monthlyR);
       rowContribution += sip;
       invested += sip;

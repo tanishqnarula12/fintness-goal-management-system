@@ -288,30 +288,32 @@ export function GoalFormModal({ initial, assetAllocation, onClose, onSave }) {
                   <span>Amount to map (₹)</span>
                 </div>
                 {assetHoldings.map(a => (
-                  <div key={a.sectionId + a.label} className="flex items-center gap-3">
-                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div key={a.sectionId + a.label} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-1">
+                    <div className="flex items-center gap-2 min-w-[140px] flex-1 basis-40">
                       <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: a.color }} />
-                      <span className="text-sm font-semibold text-slate-700 dark:text-slate-300 truncate">{a.label}</span>
-                      <span className="text-xs font-bold text-slate-400 dark:text-slate-500 tabular-nums shrink-0">{fmtINR(a.amount)}</span>
+                      <span className="text-sm font-semibold text-slate-700 dark:text-slate-300 break-words">{a.label}</span>
+                      <span className="text-xs font-bold text-slate-400 dark:text-slate-500 tabular-nums shrink-0 whitespace-nowrap">{fmtINR(a.amount)}</span>
                     </div>
-                    <div className="relative w-36 shrink-0">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-600 text-sm pointer-events-none">₹</span>
-                      <input
-                        type="number" min="0" max={a.amount} step="any"
-                        value={mapAmt[a.label] ?? ''}
-                        onChange={(e) => setMap(a.label, e.target.value)}
-                        placeholder="0"
-                        className={inputCls + ' pl-7 !py-2 tabular-nums'}
-                      />
+                    <div className="flex items-center gap-2 ml-auto shrink-0">
+                      <div className="relative w-32 sm:w-36 shrink-0">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-600 text-sm pointer-events-none">₹</span>
+                        <input
+                          type="number" min="0" max={a.amount} step="any"
+                          value={mapAmt[a.label] ?? ''}
+                          onChange={(e) => setMap(a.label, e.target.value)}
+                          placeholder="0"
+                          className={inputCls + ' pl-7 !py-2 tabular-nums'}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setMap(a.label, String(a.amount))}
+                        className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 hover:underline shrink-0 w-10 text-left cursor-pointer"
+                        title="Map full value"
+                      >
+                        All
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setMap(a.label, String(a.amount))}
-                      className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 hover:underline shrink-0 w-10 text-left cursor-pointer"
-                      title="Map full value"
-                    >
-                      All
-                    </button>
                   </div>
                 ))}
                 <div className="flex items-center justify-between pt-2.5 mt-1 border-t border-blue-100 dark:border-slate-800">

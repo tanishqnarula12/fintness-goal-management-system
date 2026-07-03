@@ -137,41 +137,70 @@ export const avatarColor = (name) => {
 
 export const initials = (name) => name.split(' ').map(p => p[0]).slice(0, 2).join('').toUpperCase();
 
-export function fvOfSipStream(startSip, startM, startY, tgtM, tgtY, monthlyR, incRate) {
-  if (startSip <= 0) return 0;
+// Future value of a monthly SIP stream that runs for `totalMonths`, stepping up
+// on each 12-month anniversary of the goal's start (NOT on the calendar new year).
+// e.g. a goal started 12 Jun 2026 keeps SIP flat Jun 2026→May 2027, steps up in
+// Jun 2027, steps up again Jun 2028, and so on.
+export function fvOfSipStream(startSip, totalMonths, monthlyR, incRate) {
+  if (startSip <= 0 || totalMonths <= 0) return 0;
   let bal = 0;
   let sip = startSip;
-  for (let y = startY; y <= tgtY; y++) {
-    if (y > startY) sip = sip * (1 + incRate);
-    const firstMonth = y === startY ? startM : 1;
-    const lastMonth = y === tgtY ? tgtM : 12;
-    const monthsInRow = y === tgtY ? Math.max(0, lastMonth - firstMonth) : (lastMonth - firstMonth + 1);
-    for (let i = 0; i < monthsInRow; i++) {
-      bal = (bal + sip) * (1 + monthlyR);
-    }
+  for (let m = 0; m < totalMonths; m++) {
+    if (m > 0 && m % 12 === 0) sip = sip * (1 + incRate); // anniversary step-up
+    bal = (bal + sip) * (1 + monthlyR);
   }
   return bal;
 }
 
+// Re-base the plan to the most recent logged actual ("Create Log") value.
+// From that date onward the corpus starts at the actual amount and the remaining
+// SIP/projection are recomputed — so logged values actually move the numbers, not
+// just the chart. Inflation of the goal cost stays anchored to the creation date.
+// Returns the effective start month/year and starting corpus.
+export function goalAnchor(goal) {
+  const createdM = goal.createdMonth || CURRENT_MONTH;
+  const createdY = goal.createdYear || CURRENT_YEAR;
+  const actuals = Array.isArray(goal.actuals) ? goal.actuals : [];
+  let latest = null;
+  actuals.forEach(a => {
+    const d = new Date(a.date);
+    if (isNaN(d.getTime())) return;
+    if (!latest || d > new Date(latest.date)) latest = a;
+  });
+  if (latest) {
+    const d = new Date(latest.date);
+    const am = d.getMonth() + 1, ay = d.getFullYear();
+    // Only re-base for a logged value at/after the goal's creation
+    if (monthsBetween(createdM, createdY, am, ay) >= 0) {
+      return { anchorM: am, anchorY: ay, anchorInv: Number(latest.amount) || 0, rebased: true };
+    }
+  }
+  return { anchorM: createdM, anchorY: createdY, anchorInv: Number(goal.currentInv) || 0, rebased: false };
+}
+
 export function calcGoal(goal) {
-  const startM = goal.createdMonth || CURRENT_MONTH;
-  const startY = goal.createdYear || CURRENT_YEAR;
+  const createdM = goal.createdMonth || CURRENT_MONTH;
+  const createdY = goal.createdYear || CURRENT_YEAR;
   const tgtM = goal.targetMonth || 1;
   const tgtY = goal.targetYear || CURRENT_YEAR;
-  const months = Math.max(0, monthsBetween(startM, startY, tgtM, tgtY));
+  // Full horizon (creation → target) inflates the goal cost; remaining horizon
+  // (anchor → target) grows the corpus & SIP so logged actuals re-base the plan.
+  const inflationMonths = Math.max(0, monthsBetween(createdM, createdY, tgtM, tgtY));
+  const { anchorM, anchorY, anchorInv, rebased } = goalAnchor(goal);
+  const months = Math.max(0, monthsBetween(anchorM, anchorY, tgtM, tgtY));
   const years = months / 12;
   const amount = Number(goal.amount) || 0;
   const inflation = (Number(goal.inflation) || 0) / 100;
   const r = (Number(goal.expectedReturn) || 0) / 100;
   const incRate = (Number(goal.sipIncRate) || 0) / 100;
-  const currentInv = Number(goal.currentInv) || 0;
+  const currentInv = anchorInv;
   const currentSip = Number(goal.currentSip) || 0;
   const monthlyR = r / 12;
   const monthlyInfl = Math.pow(1 + inflation, 1 / 12) - 1;
 
-  const futureValue = amount * Math.pow(1 + monthlyInfl, months);
+  const futureValue = amount * Math.pow(1 + monthlyInfl, inflationMonths);
   const fvOfCurrentInv = currentInv * Math.pow(1 + monthlyR, months);
-  const fvOfCurrentSip = fvOfSipStream(currentSip, startM, startY, tgtM, tgtY, monthlyR, incRate);
+  const fvOfCurrentSip = fvOfSipStream(currentSip, months, monthlyR, incRate);
 
   const projectedCorpus = fvOfCurrentInv + fvOfCurrentSip;
   const shortfall = Math.max(0, futureValue - projectedCorpus);
@@ -183,13 +212,13 @@ export function calcGoal(goal) {
     if (sipTargetFV > 0) {
       let lo = 0;
       let hi = Math.max(sipTargetFV, 1);
-      while (fvOfSipStream(hi, startM, startY, tgtM, tgtY, monthlyR, incRate) < sipTargetFV) {
+      while (fvOfSipStream(hi, months, monthlyR, incRate) < sipTargetFV) {
         hi *= 2;
         if (hi > 1e15) break;
       }
       for (let i = 0; i < 80; i++) {
         const mid = (lo + hi) / 2;
-        const fv = fvOfSipStream(mid, startM, startY, tgtM, tgtY, monthlyR, incRate);
+        const fv = fvOfSipStream(mid, months, monthlyR, incRate);
         if (fv < sipTargetFV) lo = mid; else hi = mid;
       }
       sipRequired = (lo + hi) / 2;
@@ -204,33 +233,38 @@ export function calcGoal(goal) {
   const additionalSip = sipRequired - currentSip;
   const sipOnTrack = currentSip >= sipRequired - 0.5;
 
-  return { months, years, futureValue, projectedCorpus, shortfall, achievementPct, sipRequired, additionalSip, sipOnTrack, lumpSumRequired, fvOfCurrentInv, fvOfCurrentSip };
+  return { months, years, futureValue, projectedCorpus, shortfall, achievementPct, sipRequired, additionalSip, sipOnTrack, lumpSumRequired, fvOfCurrentInv, fvOfCurrentSip, rebased, anchorInv, anchorMonth: anchorM, anchorYear: anchorY };
 }
 
+// Year-by-year projection where each row is a 12-month window anchored to the
+// goal's start (anniversary) month — e.g. a goal started Jun 2026 yields rows
+// Jun 2026→Jun 2027, Jun 2027→Jun 2028, … The final row may be a partial period
+// if the target date isn't a whole number of years away. SIP steps up on each
+// anniversary, staying consistent with fvOfSipStream / calcGoal.
 export function buildProjection(goal, sipOverride) {
-  const startM = goal.createdMonth || CURRENT_MONTH;
-  const startY = goal.createdYear || CURRENT_YEAR;
+  // Anchor to the latest logged actual (if any) so the projection reflects reality.
+  const { anchorM: startM, anchorY: startY, anchorInv } = goalAnchor(goal);
   const tgtM = goal.targetMonth || 1;
   const tgtY = goal.targetYear;
   const totalMonths = Math.max(0, monthsBetween(startM, startY, tgtM, tgtY));
-  const r = goal.expectedReturn / 100;
-  const monthlyR = r / 12;
+  const monthlyR = (goal.expectedReturn / 100) / 12;
   const incRate = goal.sipIncRate / 100;
   const rows = [];
 
   if (totalMonths === 0) return rows;
 
-  const startBal = Number(goal.currentInv) || 0;
+  const baseAbs = startY * 12 + (startM - 1); // absolute month index of the start
+  const startBal = anchorInv;
   const startSip = sipOverride !== undefined ? sipOverride : (Number(goal.currentSip) || 0);
   let bal = startBal;
-  let sip = startSip;
   let invested = startBal;
 
-  for (let y = startY; y <= tgtY; y++) {
-    if (y > startY) sip = sip * (1 + incRate);
-    const firstMonth = y === startY ? startM : 1;
-    const lastMonth = y === tgtY ? tgtM : 12;
-    const monthsInRow = y === tgtY ? Math.max(0, lastMonth - firstMonth) : (lastMonth - firstMonth + 1);
+  const numPeriods = Math.ceil(totalMonths / 12);
+  for (let k = 0; k < numPeriods; k++) {
+    const sip = startSip * Math.pow(1 + incRate, k); // stepped up on each anniversary
+    const periodStart = k * 12;
+    const periodEnd = Math.min((k + 1) * 12, totalMonths);
+    const monthsInRow = periodEnd - periodStart;
 
     const openingBal = bal;
     let rowContribution = 0;
@@ -239,12 +273,19 @@ export function buildProjection(goal, sipOverride) {
       rowContribution += sip;
       invested += sip;
     }
-    const displayLastMonth = y === tgtY ? Math.max(firstMonth, tgtM - 1) : lastMonth;
-    if (monthsInRow === 0 && rows.length > 0) continue;
+
+    const sAbs = baseAbs + periodStart;
+    const eAbs = baseAbs + periodEnd;
+    const startMonth = (sAbs % 12) + 1, startYr = Math.floor(sAbs / 12);
+    const endMonth = (eAbs % 12) + 1, endYr = Math.floor(eAbs / 12);
+
     rows.push({
-      year: y,
-      firstMonth,
-      lastMonth: displayLastMonth,
+      periodIndex: k,
+      startMonth, startYear: startYr,
+      endMonth, endYear: endYr,
+      startAbs: sAbs, endAbs: eAbs,
+      label: `${monthLabel(startMonth, startYr)} – ${monthLabel(endMonth, endYr)}`,
+      chartName: `${MONTH_NAMES[endMonth - 1]} '${String(endYr).slice(2)}`,
       monthsCovered: monthsInRow,
       isPartial: monthsInRow < 12,
       openingBal,

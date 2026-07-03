@@ -127,7 +127,7 @@ export default function ClientDetail({ client, totals, onAddGoal, onSelectGoal, 
               <h4 className="text-sm font-black text-slate-500 dark:text-slate-400 uppercase tracking-widest pl-2.5 border-l-2 border-blue-500 dark:border-blue-400 leading-none">SIP</h4>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <SummaryTile label="Current SIP Allocation" value={fmtSip(totals.totalCurrentSip) + '/mo'} icon={TrendingUp} accent="blue" />
-                <SummaryTile label="Additional SIP Required" value={fmtSip(totals.totalAdditional) + '/mo'} icon={Plus} accent="indigo" />
+                <SummaryTile label="Additional SIP Required" value={fmtSip(totals.totalAdditional) + '/mo'} icon={Plus} accent={totals.totalAdditional < 0 ? 'rose' : 'indigo'} />
                 <SummaryTile label="Total Monthly SIP Needed" value={fmtSip(totals.totalCurrentSip + totals.totalAdditional) + '/mo'} icon={CheckCircle2} accent="emerald" />
               </div>
             </div>
@@ -410,6 +410,7 @@ function SummaryTile({ label, value, icon: Icon, accent }) {
     blue: 'bg-blue-50/60 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-900/40 shadow-sm',
     indigo: 'bg-indigo-50/60 dark:bg-indigo-950/20 text-indigo-700 dark:text-indigo-400 border-indigo-200 dark:border-indigo-900/40 shadow-sm',
     emerald: 'bg-emerald-50/60 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-900/40 shadow-sm',
+    rose: 'bg-rose-50/60 dark:bg-rose-950/20 text-rose-700 dark:text-rose-400 border-rose-200 dark:border-rose-900/40 shadow-sm',
   };
   return (
     <div className={`rounded-2xl ${accents[accent]} p-5 flex items-start justify-between border border-transparent transition-all duration-300`}>

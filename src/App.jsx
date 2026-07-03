@@ -574,6 +574,7 @@ export default function App() {
       {showGoalForm && selectedClient && (
         <GoalFormModal
           initial={editingGoalId ? selectedClient.goals.find(g => g.id === editingGoalId) : null}
+          assetAllocation={selectedClient.assetAllocation}
           onClose={() => { setShowGoalForm(false); setEditingGoalId(null); }}
           onSave={(g) => {
             if (editingGoalId) {

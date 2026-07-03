@@ -8,7 +8,7 @@ import {
 } from 'recharts';
 import { Card, btnSecondary, btnPrimary, btnGhost, inputCls } from './UI';
 import {
-  calcGoal, buildProjection, monthLabel, fmtINR, fmtSip, goalIcon, goalEmoji, achievementColor, MONTH_NAMES, goalCreatedLabel, needsKidName, fmtDate, uid
+  calcGoal, buildProjection, monthLabel, fmtINR, fmtSip, goalEmoji, goalCreatedLabel, needsKidName, fmtDate, uid
 } from '../utils/calc';
 
 export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveActuals, isViewer }) {
@@ -19,28 +19,37 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveAct
   // Logged actual portfolio values ("Create Log")
   const actuals = Array.isArray(goal.actuals) ? goal.actuals : [];
 
-  // Quick lookup of each projection year's opening/closing balance, to compare actuals against
-  const projByYear = new Map();
-  projection.forEach(r => projByYear.set(r.year, r));
-
-  // Projected corpus interpolated to the exact date of a logged entry (opening → closing across the year)
-  const projAt = (dateStr) => {
+  // Which anniversary period does a given date fall into? (dates past the target clamp to the last period)
+  const periodOf = (dateStr) => {
     const d = new Date(dateStr);
     if (isNaN(d.getTime())) return null;
-    const r = projByYear.get(d.getFullYear());
+    const dAbs = d.getFullYear() * 12 + d.getMonth(); // 0-based month index
+    let found = projection.find(r => dAbs >= r.startAbs && dAbs < r.endAbs);
+    if (!found && projection.length) {
+      const last = projection[projection.length - 1];
+      if (dAbs >= last.endAbs) found = last;
+    }
+    return found || null;
+  };
+
+  // Projected corpus interpolated to the exact date of a logged entry (opening → closing across the period)
+  const projAt = (dateStr) => {
+    const r = periodOf(dateStr);
     if (!r) return null;
-    const frac = Math.min(1, Math.max(0, (d.getMonth() + 1) / 12));
+    const d = new Date(dateStr);
+    const dAbs = d.getFullYear() * 12 + d.getMonth() + (d.getDate() - 1) / 30;
+    const span = r.endAbs - r.startAbs;
+    const frac = span > 0 ? Math.min(1, Math.max(0, (dAbs - r.startAbs) / span)) : 0;
     return r.openingBal + (r.closingBal - r.openingBal) * frac;
   };
 
-  // Keep only the latest logged value per year for plotting (one point per x-axis tick)
-  const actualByYear = new Map();
+  // Keep only the latest logged value per period for plotting (one point per x-axis tick)
+  const actualByPeriod = new Map();
   actuals.forEach(a => {
-    const d = new Date(a.date);
-    if (isNaN(d.getTime())) return;
-    const y = d.getFullYear();
-    const prev = actualByYear.get(y);
-    if (!prev || new Date(a.date) > new Date(prev.date)) actualByYear.set(y, a);
+    const r = periodOf(a.date);
+    if (!r) return;
+    const prev = actualByPeriod.get(r.periodIndex);
+    if (!prev || new Date(a.date) > new Date(prev.date)) actualByPeriod.set(r.periodIndex, a);
   });
 
   // Overall standing = where the most recent logged value sits vs its projection (drives line + shadow colour)
@@ -55,24 +64,24 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveAct
   const actualColor = aheadOverall ? '#10b981' : '#ef4444';
   const actualFill = aheadOverall ? 'url(#colorActualUp)' : 'url(#colorActualDown)';
 
-  const hasActuals = actualByYear.size > 0;
-  const startYear = projection.length ? projection[0].year : null;
-  const startCorpus = Number(goal.currentInv) || 0;
+  const hasActuals = actualByPeriod.size > 0;
+  // Corpus the projection starts from — the re-based anchor (latest logged actual) when present
+  const startCorpus = projection.length ? projection[0].openingBal : (Number(goal.currentInv) || 0);
 
   // Format data for Recharts
   const chartData = projection.map(r => {
     const row = {
-      name: String(r.year),
+      name: r.chartName,
       'Closing Balance': Math.round(r.closingBal),
       'Total Invested': Math.round(r.totalInvested)
     };
-    const a = actualByYear.get(r.year);
+    const a = actualByPeriod.get(r.periodIndex);
     if (a) {
       const proj = projAt(a.date);
       row['Actual'] = Math.round(Number(a.amount) || 0);
       row['ActualProj'] = proj != null ? Math.round(proj) : null;
       row['ActualIsEntry'] = true;
-    } else if (hasActuals && r.year === startYear) {
+    } else if (hasActuals && r.periodIndex === 0) {
       // Synthetic origin so the dotted actual line starts from the current corpus, just like the projected line
       row['Actual'] = Math.round(startCorpus);
       row['ActualProj'] = Math.round(r.openingBal);
@@ -146,6 +155,11 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveAct
             Projected corpus <span className="font-bold text-slate-700 dark:text-slate-200 tabular-nums">{fmtINR(c.projectedCorpus)}</span> vs target future value <span className="font-bold text-slate-700 dark:text-slate-200 tabular-nums">{fmtINR(c.futureValue)}</span>
             {c.shortfall > 0 && <> · shortfall <span className="font-bold text-rose-600 dark:text-rose-400 tabular-nums">{fmtINR(c.shortfall)}</span></>}
           </p>
+          {c.rebased && (
+            <p className="text-[11px] text-blue-600 dark:text-blue-400 mt-2 font-semibold flex items-center gap-1.5">
+              <Info size={12} /> Plan re-based to your latest logged value {fmtINR(c.anchorInv)} as of {monthLabel(c.anchorMonth, c.anchorYear)} — SIP, projection &amp; achievement are recomputed from there.
+            </p>
+          )}
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 pt-6 border-t border-slate-200 dark:border-slate-800 text-xs">
@@ -257,7 +271,7 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveAct
             <table className="w-full text-sm">
               <thead className="bg-slate-50/80 dark:bg-slate-950/80 text-slate-500 dark:text-slate-400 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200 dark:border-slate-800">
                 <tr>
-                  <th className="text-left px-6 py-4 font-bold">Year</th>
+                  <th className="text-left px-6 py-4 font-bold">Period</th>
                   <th className="text-right px-6 py-4 font-bold">Opening Bal</th>
                   <th className="text-right px-6 py-4 font-bold">Monthly SIP</th>
                   <th className="text-right px-6 py-4 font-bold">Contribution</th>
@@ -268,12 +282,12 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveAct
               <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/50">
                 {projection.map((r, i) => (
                   <tr key={i} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors">
-                    <td className="px-6 py-3.5 font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+                    <td className="px-6 py-3.5 font-bold text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
                       <span className="inline-flex items-center gap-1.5">
-                        {r.year}
+                        {r.label}
                         {r.isPartial && (
                           <span
-                            title={`Calculated months: ${MONTH_NAMES[r.firstMonth - 1]}${r.firstMonth === r.lastMonth ? '' : '–' + MONTH_NAMES[r.lastMonth - 1]} ${r.year} (${r.monthsCovered} ${r.monthsCovered === 1 ? 'month' : 'months'})`}
+                            title={`Partial period — ${r.monthsCovered} ${r.monthsCovered === 1 ? 'month' : 'months'} of contributions (${r.label})`}
                             className="text-slate-400 hover:text-slate-650 cursor-help"
                           >
                             <Info size={13} />

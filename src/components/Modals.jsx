@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { X, CheckCircle2, Upload, AlertCircle, FileSpreadsheet } from 'lucide-react';
+import { X, CheckCircle2, Upload, AlertCircle, FileSpreadsheet, Link2, Wallet } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Field, inputCls, selectCls, btnPrimary, btnGhost } from './UI';
 import {
   calcGoal, monthsBetween, fmtFull, fmtINR, fmtSip, nv, parseNum, GOAL_PRESETS, CURRENT_MONTH, CURRENT_YEAR, MONTH_NAMES, needsKidName
 } from '../utils/calc';
+import { filledItems } from '../utils/assets';
 
 function Modal({ title, onClose, children, footer, maxWidth = 'max-w-md' }) {
   return (
@@ -68,7 +69,7 @@ export function ClientFormModal({ initial, onClose, onSave }) {
   );
 }
 
-export function GoalFormModal({ initial, onClose, onSave }) {
+export function GoalFormModal({ initial, assetAllocation, onClose, onSave }) {
   const isEdit = !!initial;
   const initialIsPreset = initial ? GOAL_PRESETS.includes(initial.name) && initial.name !== 'Others' : true;
   const [nameChoice, setNameChoice] = useState(initial ? (initialIsPreset ? initial.name : 'Others') : '');
@@ -124,7 +125,30 @@ export function GoalFormModal({ initial, onClose, onSave }) {
   };
   const effectiveName = nameChoice === 'Others' ? customName.trim() : nameChoice;
   const showKidName = needsKidName(effectiveName);
-  const previewCalc = calcGoal({ ...form, name: effectiveName });
+
+  // --- Map Asset ---------------------------------------------------------
+  // The client's existing asset holdings (financial + physical, excludes
+  // liabilities) available to seed this goal's starting corpus.
+  const assetHoldings = useMemo(() => {
+    if (!assetAllocation) return [];
+    return ['financial', 'physical'].flatMap(sid =>
+      filledItems(assetAllocation, sid).map(it => ({ ...it, sectionId: sid }))
+    );
+  }, [assetAllocation]);
+  const hasAssets = assetHoldings.length > 0;
+
+  const [mapOpen, setMapOpen] = useState(false);
+  const [mapAmt, setMapAmt] = useState({}); // { [assetLabel]: amountString }
+  const setMap = (label, v) => setMapAmt(prev => ({ ...prev, [label]: v }));
+  const mappedTotal = assetHoldings.reduce((s, a) => {
+    const raw = Number(String(mapAmt[a.label] ?? '').replace(/,/g, ''));
+    return s + (mapOpen && isFinite(raw) && raw > 0 ? raw : 0);
+  }, 0);
+
+  // The corpus that actually drives the calculation = typed corpus + mapped assets
+  const effectiveCurrentInv = (Number(form.currentInv) || 0) + mappedTotal;
+
+  const previewCalc = calcGoal({ ...form, name: effectiveName, currentInv: effectiveCurrentInv });
   const targetBeforeStart = monthsBetween(form.createdMonth, form.createdYear, form.targetMonth, form.targetYear) <= 0;
 
   const handleSave = () => {
@@ -139,7 +163,9 @@ export function GoalFormModal({ initial, onClose, onSave }) {
       inflation: Number(form.inflation) || 0,
       expectedReturn: Number(form.expectedReturn) || 0,
       sipIncRate: Number(form.sipIncRate) || 0,
-      currentInv: Number(form.currentInv) || 0,
+      // Mapped asset amounts are folded into the stored corpus so every
+      // downstream calculation (SIP, projection, achievement) uses it.
+      currentInv: effectiveCurrentInv,
       currentSip: Number(form.currentSip) || 0,
       createdAt,
     };
@@ -228,7 +254,7 @@ export function GoalFormModal({ initial, onClose, onSave }) {
         <Field label="SIP Annual Step-Up (%)">
           <input type="number" step="0.1" value={nv(form.sipIncRate)} onChange={(e) => upd('sipIncRate', parseNum(e))} className={inputCls} />
         </Field>
-        <Field label="Existing Accumulated Corpus (₹)">
+        <Field label="Existing Accumulated Corpus (₹)" hint={mappedTotal > 0 ? `Typed + ${fmtINR(mappedTotal)} mapped = ${fmtINR(effectiveCurrentInv)} effective` : null}>
           <input type="number" value={nv(form.currentInv)} onChange={(e) => upd('currentInv', parseNum(e, 0))} className={inputCls} placeholder="₹ e.g. 5,00,000" />
         </Field>
         <div className="md:col-span-2">
@@ -236,6 +262,68 @@ export function GoalFormModal({ initial, onClose, onSave }) {
             <input type="number" value={nv(form.currentSip)} onChange={(e) => upd('currentSip', parseNum(e, 0))} className={inputCls} placeholder="₹ e.g. 25,000" />
           </Field>
         </div>
+
+        {/* Map Asset — seed the goal corpus from the client's existing asset allocation */}
+        {hasAssets && (
+          <div className="md:col-span-2">
+            <label className="flex items-center gap-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={mapOpen}
+                onChange={(e) => setMapOpen(e.target.checked)}
+                className="w-4 h-4 rounded border-slate-300 dark:border-slate-700 text-blue-600 focus:ring-blue-500 cursor-pointer"
+              />
+              <span className="inline-flex items-center gap-1.5 text-sm font-bold text-slate-800 dark:text-slate-200">
+                <Link2 size={14} className="text-blue-600 dark:text-blue-400" /> Map Asset
+              </span>
+              <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
+                Add part of this client's existing assets to the goal corpus
+              </span>
+            </label>
+
+            {mapOpen && (
+              <div className="mt-3 rounded-xl border border-blue-100 dark:border-slate-800 bg-blue-50/30 dark:bg-slate-950/40 p-4 space-y-2.5 animate-fade-in">
+                <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 px-1">
+                  <span>Asset · current value</span>
+                  <span>Amount to map (₹)</span>
+                </div>
+                {assetHoldings.map(a => (
+                  <div key={a.sectionId + a.label} className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: a.color }} />
+                      <span className="text-sm font-semibold text-slate-700 dark:text-slate-300 truncate">{a.label}</span>
+                      <span className="text-xs font-bold text-slate-400 dark:text-slate-500 tabular-nums shrink-0">{fmtINR(a.amount)}</span>
+                    </div>
+                    <div className="relative w-36 shrink-0">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-600 text-sm pointer-events-none">₹</span>
+                      <input
+                        type="number" min="0" max={a.amount} step="any"
+                        value={mapAmt[a.label] ?? ''}
+                        onChange={(e) => setMap(a.label, e.target.value)}
+                        placeholder="0"
+                        className={inputCls + ' pl-7 !py-2 tabular-nums'}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setMap(a.label, String(a.amount))}
+                      className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 hover:underline shrink-0 w-10 text-left cursor-pointer"
+                      title="Map full value"
+                    >
+                      All
+                    </button>
+                  </div>
+                ))}
+                <div className="flex items-center justify-between pt-2.5 mt-1 border-t border-blue-100 dark:border-slate-800">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                    <Wallet size={13} /> Mapped to corpus
+                  </span>
+                  <span className="text-sm font-black text-blue-700 dark:text-blue-400 tabular-nums">{fmtINR(mappedTotal)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5 mt-6 p-5 bg-gradient-to-br from-blue-50/50 to-indigo-50/50 dark:from-slate-950 dark:to-slate-900 border border-blue-100 dark:border-slate-800 rounded-xl shadow-sm">

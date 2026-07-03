@@ -310,3 +310,62 @@ For a goal (₹50L target, 10 yr, 12% / 10% step-up, ₹5L corpus, ₹25k SIP):
 
 Weaker logged values increase the required SIP; stronger ones reduce it. The logged
 value now genuinely drives every number, not just the graph.
+
+**Correction (superseded above):** the first version of this feature shifted the
+*entire projection grid* to start at the logged actual's date, so a goal created
+Jun 2025 with a log entry in Jun 2026 showed a table starting at "Jun 2026 – Jun 2027"
+— the Jun 2025 – Jun 2026 row disappeared. That's wrong: **the period grid must
+always start at the goal's creation date** (per section 1), regardless of any
+logged actuals. Fixed by decoupling the grid from the correction:
+
+- `buildProjection` and the new lean `finalBalance` (used by `calcGoal`) both build
+  their period grid from `goal.createdMonth/createdYear` **unconditionally** — never
+  from the anchor.
+- The logged-actual correction is applied **inside** the month-by-month loop instead:
+  at the exact absolute month index that matches the latest actual's date, the
+  running balance is snapped to that logged value, then compounding resumes from
+  there for the rest of the loop. The row grid itself never moves.
+- If the logged date lands exactly on a row boundary (the common case — advisors
+  usually log at/near an anniversary), that row's **Opening Bal** column is set to
+  the corrected value directly (rather than the pre-correction previous-row closing),
+  so e.g. logging ₹10.18L on 15 Jun 2026 makes the "Jun 2026 – Jun 2027" row show
+  Opening Bal ₹10.18L. A log landing mid-row still corrects the trajectory, it's just
+  reflected as a bigger jump in that row's "Estimated Growth" column instead of the
+  opening figure (splitting a row at an arbitrary mid-year date was judged not worth
+  the complexity for a 12-month-block table).
+- `calcGoal` no longer duplicates the growth formula in closed form (`fvOfSipStream`
+  removed). It now calls a lean, allocation-free `finalBalance(goal, sipOverride)`
+  — identical month-by-month math to `buildProjection`, minus the row objects — so
+  `calcGoal.projectedCorpus` and `buildProjection(goal)`'s last row `closingBal`
+  are **always numerically identical** (single source of truth, verified in testing).
+  `sipRequired` is found via binary search calling `finalBalance(goal, candidateSip)`
+  (~60 iterations; cheap since it's a flat scalar loop, no object allocation).
+- `lumpSumRequired` is unchanged from the previous version: it's a distinct concept
+  (a hypothetical top-up invested *today*, i.e. at the anchor) and still uses
+  `monthsBetween(anchor → target)` with `anchorInv` as the base.
+- `goal.currentMonth/currentYear` (used for `months`/`years`/"Planning Horizon") is
+  back to being the full creation→target horizon — matching the app's original,
+  pre-any-of-this-session behaviour (it was never "time remaining from today," so no
+  regression there).
+
+---
+
+## 5. Map Asset row layout — fixed label truncation on narrow widths
+
+### Bug
+On the Map Asset panel (section 3), each asset row was a single `flex` line with
+`min-w-0 flex-1` wrapping the label+value and `shrink-0` on the amount input + "All"
+button. At narrow viewport widths the fixed-width input/button starved the label of
+space and the browser truncated it down to a single character (e.g. "Indian Equity"
+→ "I.", "Fixed Deposits (FDs)" → "F").
+
+### Fix — `src/components/Modals.jsx`, the `assetHoldings.map(...)` block
+Changed the row from a single non-wrapping flex line to `flex flex-wrap`, so when
+there isn't enough horizontal room, the amount-input + "All" button group wraps to
+its own line **below** the label instead of crushing it:
+- Row wrapper: `flex items-center gap-3` → `flex flex-wrap items-center gap-x-3 gap-y-2 py-1`.
+- Label block: `min-w-0 flex-1` → `min-w-[140px] flex-1 basis-40`; removed `truncate`,
+  added `break-words` (long custom labels wrap instead of vanishing).
+- Amount input width: `w-36` → `w-32 sm:w-36` (a bit narrower on small screens).
+- Input + "All" button now share a `flex items-center gap-2 ml-auto shrink-0`
+  container so they stay grouped together and push right, wrapping as a unit.

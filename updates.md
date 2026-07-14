@@ -658,3 +658,82 @@ The legend and tooltip were updated to match the new labels/colors
 (Target Value: dashed `#f59e0b` amber, no fill; Current Value: solid blue/
 indigo area, same gradient as before; Invested Value: solid slate area, same
 gradient as before).
+
+---
+
+## 10. Goal form modal: sticky header/footer (long forms were losing their buttons)
+
+### The bug
+The shared `Modal` component (`src/components/Modals.jsx`, used by
+`ClientFormModal`, `GoalFormModal`, `ExcelImportModal`) scrolled the **entire**
+modal — including the title bar and the Cancel/Save footer — as one block.
+"Configure New Goal" has ~12 fields plus a preview strip, so on anything
+shorter than a very tall viewport (or at reduced browser zoom, e.g. 80%) you'd
+scroll straight past the title and the Save button, landing on a screenful of
+bare inputs with no way to tell what modal you were in or how to submit it.
+
+### The fix
+Rebuilt `Modal` to match the pinned-header/scrollable-body/pinned-footer
+pattern already used successfully in `AssetAllocationModal.jsx`:
+```jsx
+function Modal({ title, onClose, children, footer, maxWidth = 'max-w-md' }) {
+  return (
+    <div className="fixed inset-0 ... flex items-center justify-center p-4 z-50 animate-fade-in" onClick={onClose}>
+      <div className={`... w-full ${maxWidth} ... flex flex-col max-h-[92vh]`} onClick={(e) => e.stopPropagation()}>
+        <div className="... p-5 border-b ... shrink-0">{/* title + close */}</div>
+        <div className="p-5 overflow-y-auto">{children}</div>
+        {footer && <div className="... border-t ... shrink-0">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+```
+Key changes: the modal card is capped at `max-h-[92vh]` and laid out as
+`flex flex-col`; the header and footer get `shrink-0` so they never compress;
+only the middle body `div` scrolls (`overflow-y-auto`) — the outer backdrop no
+longer scrolls at all. Verified in a browser at a cramped viewport (760px
+tall, forcing scroll): scrolling the body leaves "Configure New Goal" + the
+close X pinned at top and "Cancel / Configure Goal" pinned at bottom the
+entire time. This is a one-function fix that improves all three modals using
+the shared component, not just the goal form.
+
+---
+
+## 11. Year-by-year projection table: an ⓘ per row explaining Create Log jumps
+
+### Intent
+A period's numbers can now move because of a logged contribution (§8), but
+there was no way to tell *why* a given row jumped just by looking at the
+table — you'd have to cross-reference the Create Log list by date yourself.
+Added a **blue info icon** directly on the row(s) a contribution landed in,
+so hovering explains exactly what changed, right where the number changed.
+
+### Files changed — `src/utils/calc.js`
+- `contributionEvents(goal)` now also returns `entries`: the parsed, valid
+  contribution list (each tagged with `absMonth`), not just the aggregated
+  lump-sum-by-month / SIP-delta structures used for the maths.
+- `simulate(goal, { buildRows: true })` filters `entries` down to
+  `contributionsInRow = entries.filter(e => e.absMonth >= sAbs && e.absMonth < eAbs)`
+  for each row and attaches it — so `buildProjection(goal)` rows now carry
+  exactly which log entries (if any) fall inside that 12-month window.
+
+### Files changed — `src/components/GoalDetail.jsx`
+- New helper `contribRowHint(entries)` formats each entry into one line —
+  `"SIP +₹10,000/mo from 15 Aug 2027"` or `"Lumpsum −₹50,000 on 3 Jan 2028"` —
+  newline-joined so the native `title` tooltip shows one line per entry when a
+  period contains more than one.
+- The **Period** cell now renders a second, blue `Info` icon (distinct from
+  the existing gray "partial period" icon — both can appear together) whenever
+  `r.contributionsInRow.length > 0`, with `title={contribRowHint(r.contributionsInRow)}`.
+- The row itself gets a subtle `bg-blue-50/40 dark:bg-blue-950/10` tint when
+  it contains a contribution, so affected periods are scannable at a glance
+  without needing to hover every row.
+
+### Verified
+Direct calc-engine test: a SIP contribution logged on 15 Aug 2027 (goal
+created Jun 2025) attaches to exactly the "Jun 2027 – Jun 2028" row's
+`contributionsInRow`, no other row. Live browser test (in a temporary
+localStorage-only session, to avoid the pending Supabase migration from §8):
+logged a SIP +₹8,000/mo entry dated 10 Mar 2028 via the real Create Log form
+→ the "Jul 2027 – Jul 2028" row picked up the blue info icon and tinted
+background, and hovering it showed exactly `"SIP +₹8,000/mo from 10 Mar 2028"`.

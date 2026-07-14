@@ -11,6 +11,20 @@ import {
   calcGoal, buildProjection, monthLabel, fmtINR, fmtSip, fmtFull, goalEmoji, goalCreatedLabel, needsKidName, fmtDate, uid
 } from '../utils/calc';
 
+// Human-readable explanation of every Create Log entry that landed inside a
+// projection row, e.g. "SIP +₹10,000/mo from 15 Jun 2027\nLumpsum +₹1,00,000 on 3 Aug 2027"
+// — shown on the row's blue info icon so the row-over-row jump can be traced
+// straight back to the log entry that caused it.
+function contribRowHint(entries) {
+  return entries.map(e => {
+    const sign = e.amount >= 0 ? '+' : '−';
+    const amt = `${sign}${fmtFull(Math.abs(e.amount))}`;
+    return e.type === 'sip'
+      ? `SIP ${amt}/mo from ${fmtDate(e.date) || e.date}`
+      : `Lumpsum ${amt} on ${fmtDate(e.date) || e.date}`;
+  }).join('\n');
+}
+
 export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveContributions, isViewer }) {
   const c = calcGoal(goal);
   const projection = buildProjection(goal);
@@ -215,7 +229,7 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
               </thead>
               <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/50">
                 {projection.map((r, i) => (
-                  <tr key={i} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors">
+                  <tr key={i} className={`hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors ${r.contributionsInRow && r.contributionsInRow.length > 0 ? 'bg-blue-50/40 dark:bg-blue-950/10' : ''}`}>
                     <td className="px-6 py-3.5 font-bold text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
                       <span className="inline-flex items-center gap-1.5">
                         {r.label}
@@ -223,6 +237,14 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
                           <span
                             title={`Partial period — ${r.monthsCovered} ${r.monthsCovered === 1 ? 'month' : 'months'} of contributions (${r.label})`}
                             className="text-slate-400 hover:text-slate-650 cursor-help"
+                          >
+                            <Info size={13} />
+                          </span>
+                        )}
+                        {r.contributionsInRow && r.contributionsInRow.length > 0 && (
+                          <span
+                            title={contribRowHint(r.contributionsInRow)}
+                            className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-help"
                           >
                             <Info size={13} />
                           </span>

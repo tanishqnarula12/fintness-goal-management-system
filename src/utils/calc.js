@@ -155,18 +155,22 @@ export function goalStartingCorpus(goal) {
 
 // Parse a goal's "Create Log" contribution entries into simulation-ready
 // shape: a Map of absolute-month -> summed lump-sum amount (signed; negative
-// = withdrawal), and a date-sorted list of SIP deltas (signed; negative =
-// a decrease to the running monthly SIP from that month forward).
+// = withdrawal), a date-sorted list of SIP deltas (signed; negative = a
+// decrease to the running monthly SIP from that month forward), and the
+// original entries (each tagged with its absolute month) so callers can
+// attribute a period's numbers back to the exact log entries that caused them.
 function contributionEvents(goal) {
   const contributions = Array.isArray(goal.contributions) ? goal.contributions : [];
   const lumpsumByMonth = new Map();
   const sipDeltas = [];
+  const entries = [];
   contributions.forEach(c => {
     const d = new Date(c.date);
     if (isNaN(d.getTime())) return;
     const amt = Number(c.amount) || 0;
     if (!amt) return;
     const absMonth = d.getFullYear() * 12 + d.getMonth();
+    entries.push({ id: c.id, type: c.type, date: c.date, amount: amt, absMonth });
     if (c.type === 'lumpsum') {
       lumpsumByMonth.set(absMonth, (lumpsumByMonth.get(absMonth) || 0) + amt);
     } else if (c.type === 'sip') {
@@ -174,7 +178,8 @@ function contributionEvents(goal) {
     }
   });
   sipDeltas.sort((a, b) => a.absMonth - b.absMonth);
-  return { lumpsumByMonth, sipDeltas };
+  entries.sort((a, b) => a.absMonth - b.absMonth);
+  return { lumpsumByMonth, sipDeltas, entries };
 }
 
 // Single source of truth for the goal's growth simulation — used by both
@@ -201,7 +206,7 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
   const amount = Number(goal.amount) || 0;
   const baseAbs = createdY * 12 + (createdM - 1);
   const startSip = sipOverride !== undefined ? sipOverride : (Number(goal.currentSip) || 0);
-  const { lumpsumByMonth, sipDeltas } = contributionEvents(goal);
+  const { lumpsumByMonth, sipDeltas, entries } = contributionEvents(goal);
 
   let bal = startCorpus;
   let invested = startCorpus;
@@ -240,6 +245,9 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
       const startMonth = (sAbs % 12) + 1, startYr = Math.floor(sAbs / 12);
       const endMonth = (eAbs % 12) + 1, endYr = Math.floor(eAbs / 12);
       const targetValue = amount * Math.pow(1 + monthlyInfl, eAbs - baseAbs);
+      // Which logged Create Log entries landed in this period — lets the UI
+      // show, right on the row, exactly what caused its numbers to move.
+      const contributionsInRow = entries.filter(e => e.absMonth >= sAbs && e.absMonth < eAbs);
       rows.push({
         periodIndex: k,
         startMonth, startYear: startYr,
@@ -256,6 +264,7 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
         closingBal: bal,
         totalInvested: invested,
         targetValue,
+        contributionsInRow,
       });
     }
   }

@@ -25,6 +25,11 @@ function contribRowHint(entries) {
   }).join('\n');
 }
 
+// Does this projection row contain a logged contribution at all?
+const hasContrib = (r) => !!(r.contributionsInRow && r.contributionsInRow.length > 0);
+// Does it specifically contain a SIP change (drives the Monthly SIP underline)?
+const hasSipChange = (r) => !!(r.contributionsInRow && r.contributionsInRow.some(e => e.type === 'sip'));
+
 export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveContributions, isViewer }) {
   const c = calcGoal(goal);
   const projection = buildProjection(goal);
@@ -241,19 +246,25 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
                             <Info size={13} />
                           </span>
                         )}
-                        {r.contributionsInRow && r.contributionsInRow.length > 0 && (
+                      </span>
+                    </td>
+                    <td className="px-6 py-3.5 text-right text-slate-650 dark:text-slate-350 tabular-nums">{fmtINR(r.openingBal)}</td>
+                    <td className={`px-6 py-3.5 text-right tabular-nums ${hasSipChange(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400 font-bold' : 'text-slate-650 dark:text-slate-350'}`}>
+                      {fmtSip(r.monthlySip)}
+                    </td>
+                    <td className="px-6 py-3.5 text-right tabular-nums">
+                      <span className={`inline-flex items-center justify-end gap-1.5 ${hasContrib(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400 font-bold' : 'text-slate-650 dark:text-slate-350'}`}>
+                        {fmtINR(r.yearContribution)}
+                        {hasContrib(r) && (
                           <span
                             title={contribRowHint(r.contributionsInRow)}
-                            className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-help"
+                            className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-help no-underline"
                           >
                             <Info size={13} />
                           </span>
                         )}
                       </span>
                     </td>
-                    <td className="px-6 py-3.5 text-right text-slate-650 dark:text-slate-350 tabular-nums">{fmtINR(r.openingBal)}</td>
-                    <td className="px-6 py-3.5 text-right text-slate-650 dark:text-slate-350 tabular-nums">{fmtSip(r.monthlySip)}</td>
-                    <td className="px-6 py-3.5 text-right text-slate-650 dark:text-slate-350 tabular-nums">{fmtINR(r.yearContribution)}</td>
                     <td className="px-6 py-3.5 text-right text-emerald-600 dark:text-emerald-400 font-semibold tabular-nums">{fmtINR(r.growth)}</td>
                     <td className="px-6 py-3.5 text-right font-bold text-slate-900 dark:text-white tabular-nums">{fmtINR(r.closingBal)}</td>
                   </tr>

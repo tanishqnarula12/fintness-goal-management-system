@@ -737,3 +737,51 @@ localStorage-only session, to avoid the pending Supabase migration from §8):
 logged a SIP +₹8,000/mo entry dated 10 Mar 2028 via the real Create Log form
 → the "Jul 2027 – Jul 2028" row picked up the blue info icon and tinted
 background, and hovering it showed exactly `"SIP +₹8,000/mo from 10 Mar 2028"`.
+
+Separately (before this feature shipped), also directly verified the
+underlying claim the whole feature rests on: **a SIP change logged in a given
+year only affects that year forward, never retroactively** — ran
+`buildProjection` on the same goal with and without a `+₹1,000/mo` SIP entry
+dated mid-2029; rows for 2025–2028 were byte-for-byte identical between the
+two runs, 2029 onward diverged and the gap widened every year after (the
+step-up compounds on top of the new base), and `calcGoal.achievementPct`
+moved accordingly (37.68% → 38.75%).
+
+---
+
+## 12. Underline the exact cell a contribution changed, icon moved into Contribution
+
+### Refinement on §11
+Feedback: the single info icon next to the **Period** label told you *a*
+contribution happened in that row, but not *which number* it actually moved —
+you had to already know the SIP/Contribution math to spot the effect. Fixed
+by marking the changed values directly:
+
+- **`src/components/GoalDetail.jsx`** — two new predicates:
+  ```js
+  const hasContrib = (r) => !!(r.contributionsInRow && r.contributionsInRow.length > 0);
+  const hasSipChange = (r) => !!(r.contributionsInRow && r.contributionsInRow.some(e => e.type === 'sip'));
+  ```
+- **Monthly SIP** cell: underlined (`underline decoration-blue-500 decoration-2
+  underline-offset-4`, bold blue text) whenever `hasSipChange(r)` — i.e. only
+  when a SIP-type entry landed in that period (a lump-sum alone doesn't move
+  the SIP figure, so it isn't underlined for that).
+- **Contribution** cell: underlined the same way whenever `hasContrib(r)` —
+  i.e. for *either* entry type, since both a lump-sum and a SIP change alter
+  that period's total contribution. The blue ⓘ info icon **moved here** (off
+  the Period cell, which now only carries the unrelated gray "partial period"
+  icon) — hovering it still shows `contribRowHint(r.contributionsInRow)`
+  (one line per entry, e.g. `"SIP +₹1,000/mo from 1 Apr 2029"`).
+- The row-level blue background tint from §11 is unchanged — it's still a
+  quick at-a-glance "something happened in this row" signal, while the
+  underline+icon on the specific cell now says exactly *what*.
+
+### Verified
+Live browser test (temporary localStorage-only session again): logged a SIP
++₹1,000/mo entry dated 1 Apr 2029 → the "Jul 2028 – Jul 2029" row showed
+**both** the Monthly SIP (₹17,496) and Contribution (₹2.13 L) values
+underlined in blue, with the ⓘ icon sitting directly next to the Contribution
+figure; hovering it showed `"SIP +₹1,000/mo from 1 Apr 2029"`. Confirmed via
+page-source inspection that the underline class and the icon's `no-underline`
+marker (so the icon itself doesn't inherit the text underline) were both
+present exactly once, on the correct row.

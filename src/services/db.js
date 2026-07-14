@@ -40,6 +40,8 @@ function mapDbGoal(g) {
     kidName: g.kid_name || '',
     history: Array.isArray(g.history) ? g.history : [],
     actuals: Array.isArray(g.actuals) ? g.actuals : [],
+    mappedAssets: Array.isArray(g.mapped_assets) ? g.mapped_assets : [],
+    contributions: Array.isArray(g.contributions) ? g.contributions : [],
     createdAt: g.created_at || null
   };
 }
@@ -63,6 +65,8 @@ function mapFrontendGoal(g, clientId) {
     kid_name: g.kidName || null,
     history: Array.isArray(g.history) ? g.history : [],
     actuals: Array.isArray(g.actuals) ? g.actuals : [],
+    mapped_assets: Array.isArray(g.mappedAssets) ? g.mappedAssets : [],
+    contributions: Array.isArray(g.contributions) ? g.contributions : [],
     ...(g.createdAt ? { created_at: g.createdAt } : {})
   };
 }
@@ -197,6 +201,8 @@ export async function updateGoal(clientId, goalId, updates) {
     if (updates.kidName !== undefined) dbUpdates.kid_name = updates.kidName || null;
     if (updates.history !== undefined) dbUpdates.history = Array.isArray(updates.history) ? updates.history : [];
     if (updates.actuals !== undefined) dbUpdates.actuals = Array.isArray(updates.actuals) ? updates.actuals : [];
+    if (updates.mappedAssets !== undefined) dbUpdates.mapped_assets = Array.isArray(updates.mappedAssets) ? updates.mappedAssets : [];
+    if (updates.contributions !== undefined) dbUpdates.contributions = Array.isArray(updates.contributions) ? updates.contributions : [];
 
     const { error } = await supabase
       .from('goals')

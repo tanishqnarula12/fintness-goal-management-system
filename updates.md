@@ -369,3 +369,292 @@ its own line **below** the label instead of crushing it:
 - Amount input width: `w-36` → `w-32 sm:w-36` (a bit narrower on small screens).
 - Input + "All" button now share a `flex items-center gap-2 ml-auto shrink-0`
   container so they stay grouped together and push right, wrapping as a unit.
+
+---
+
+## 6. Asset availability across goals — "how much of this asset is left to map?"
+
+### Intent
+Map Asset (section 3) let an advisor pledge part of a client's asset toward a
+goal's corpus, but gave no visibility into whether that asset was *already*
+pledged to another goal. If a client has ₹10L of "Stocks / Shares" and Goal A
+already maps ₹2L of it, opening Goal B's Map Asset panel must show only ₹8L
+**available**, and must say which other goal(s) are using the rest.
+
+### Data model change (breaking, requires migration — see §8)
+Previously (documented in §3 above) a mapped amount was **folded into
+`currentInv` on save** and the per-asset breakdown was discarded. That made
+cross-goal availability impossible to compute. Now:
+
+- Each goal stores its own `mappedAssets: [{ id, sectionId, label, amount }]`
+  array, kept **separate** from `currentInv` (the manually-typed corpus).
+- The calculation engine (`goalStartingCorpus`, see §7) sums `currentInv +
+  Σ mappedAssets` at simulation time instead of relying on a single merged
+  number — so nothing is lost by keeping them separate.
+
+### Files changed
+
+**`src/components/Modals.jsx` → `GoalFormModal`**
+- New prop `clientGoals` (the client's full goal list, passed from
+  `src/App.jsx`: `<GoalFormModal … clientGoals={selectedClient.goals} />`).
+- `usageByLabel` — a memo that, for every asset label, lists which of the
+  client's **other** goals (excluding the one currently being edited, matched
+  by `id`) have it mapped and for how much:
+  ```js
+  const usageByLabel = useMemo(() => {
+    const map = {};
+    (clientGoals || []).forEach(g => {
+      if (initial && g.id === initial.id) return; // don't count the goal being edited against itself
+      (g.mappedAssets || []).forEach(a => {
+        const amt = Number(a.amount) || 0;
+        if (amt <= 0) return;
+        if (!map[a.label]) map[a.label] = [];
+        map[a.label].push({ goalName: g.name, amount: amt });
+      });
+    });
+    return map;
+  }, [clientGoals, initial]);
+  ```
+- Per asset row: `usedElsewhere = Σ usageByLabel[label].amount`,
+  `available = max(0, asset.amount - usedElsewhere)`. The row now shows
+  **"available / total"** (e.g. "₹8.00 L / ₹10.00 L") — green when fully
+  available, amber when partially used — and, if `usedElsewhere > 0`, a line
+  underneath: *"Already used by: Goal A (₹2.00 L)"*. The amount input's `max`
+  is set to `available` (not the full asset value), the "All" button fills
+  `available` (not the full value), and typing **more** than `available`
+  shows a red border plus *"Exceeds available balance by ₹X"* — a soft
+  warning, not a hard block (an advisor might deliberately over-commit and
+  fix the source allocation later).
+- On save, `mappedAssetsPayload` (only entries with `amount > 0`) is written
+  to `goal.mappedAssets` — `currentInv` is saved as typed, untouched.
+- When editing an existing goal, `mapOpen`/`mapAmt` are pre-filled from
+  `initial.mappedAssets` so re-opening the form shows what's already mapped.
+
+**`src/utils/calc.js`**
+- `buildGoalEdits` now logs a "Mapped assets total" line when a goal's total
+  mapped amount changes (compares before/after totals, not itemized — kept
+  simple, matching the existing edit-history style).
+
+---
+
+## 7. Planning Assumptions now shows which asset is used in which goal
+
+### Files changed
+
+**`src/utils/calc.js` → `buildAssumptionsBlock`**
+Added a new auto-generated section, appended after the existing
+Inflation/Expected-Return/SIP-step-up blocks:
+```
+Mapped Assets:
+  • Vacation: Stocks / Shares (₹20,00,000)
+  • Financial Freedom: Fixed Deposits (FDs) (₹15,00,000), Gold ETFs (₹5,00,000)
+```
+(or `No assets mapped to any goal yet.` if none). `refreshAssumptionsText`'s
+`headerRegex` was extended to recognise `Mapped Assets:` as a block header too,
+so editing/refreshing the auto-generated block doesn't leave stale copies
+behind or swallow it into the freeform notes.
+
+**`src/components/ClientDetail.jsx`**
+- `getQualitativeNotes` (which strips the auto-generated block out of the
+  combined text to isolate the advisor's freeform notes) now also strips
+  `Mapped Assets:` lines, so that section doesn't leak into "Qualitative
+  Planning Notes".
+- The always-visible **Quantitative Rates Matrix** table (no click-through
+  needed) gained a **"Mapped Assets"** column showing each goal's mapped
+  holdings as small indigo chips (`AssetLabel · ₹amount`), or *"None"* in
+  italics if the goal has no mapped assets.
+
+---
+
+## 8. Calculation bug fix — Create Log now feeds a real contribution ledger
+
+### The bug
+The previous "Create Log" (§4 in the prior session) logged an **absolute
+portfolio snapshot** ("the portfolio is worth ₹X on date Y") and re-based the
+whole plan to the *latest* snapshot. That had two problems the user flagged:
+1. It only supported one kind of entry (a value), with no way to say *why* the
+   corpus moved — was it a lump-sum deposit, or an ongoing SIP change?
+2. Only the graph reflected it in some views; the modeling was a blunt
+   "snap to last value," not a proper transaction ledger, so intermediate
+   contributions between snapshots were invisible to the maths.
+
+### The fix — Create Log is now a contribution ledger
+Each entry is one of two **signed** transaction types (sign = increase/decrease):
+- **Lumpsum** — a one-time amount added to (positive) or withdrawn from
+  (negative, "minus is for decrease") the corpus on that exact date.
+- **SIP** — a **permanent** change to the ongoing monthly SIP from that date
+  forward (positive = increase, negative = decrease). Multiple SIP entries
+  stack (cumulative).
+
+Every entry is applied **inside the month-by-month simulation** at its exact
+month, so it genuinely changes `sipRequired`, `additionalSip`,
+`achievementPct`, `projectedCorpus`, and the projection table/chart — not just
+a chart annotation.
+
+### Files & functions — `src/utils/calc.js` (full engine rewrite)
+
+**`goalStartingCorpus(goal)`** — `currentInv + Σ mappedAssets` (see §6).
+
+**`contributionEvents(goal)`** — parses `goal.contributions` into simulation-
+ready shape: a `Map<absoluteMonth, summedLumpsum>` and a date-sorted list of
+`{ absMonth, delta }` SIP changes:
+```js
+function contributionEvents(goal) {
+  const contributions = Array.isArray(goal.contributions) ? goal.contributions : [];
+  const lumpsumByMonth = new Map();
+  const sipDeltas = [];
+  contributions.forEach(c => {
+    const d = new Date(c.date);
+    if (isNaN(d.getTime())) return;
+    const amt = Number(c.amount) || 0;
+    if (!amt) return;
+    const absMonth = d.getFullYear() * 12 + d.getMonth();
+    if (c.type === 'lumpsum') lumpsumByMonth.set(absMonth, (lumpsumByMonth.get(absMonth) || 0) + amt);
+    else if (c.type === 'sip') sipDeltas.push({ absMonth, delta: amt });
+  });
+  sipDeltas.sort((a, b) => a.absMonth - b.absMonth);
+  return { lumpsumByMonth, sipDeltas };
+}
+```
+
+**`simulate(goal, { sipOverride, buildRows })`** — the **single** month-by-month
+engine (replaces the previous session's duplicated `finalBalance` +
+`buildProjection` pair, which risked drifting apart — exactly the kind of
+"bug in calculation" the user flagged). Grid always starts at goal creation
+(per §1 from the prior session); the SIP steps up on each creation
+anniversary; a running `cumSipDelta` walks the sorted SIP-delta list forward
+in lockstep with the month loop (an O(months + events) merge, not a rescan);
+a lump-sum found for the current absolute month is added straight into `bal`.
+When `buildRows` is true it also computes each row's `targetValue` — the
+inflated goal cost *as of that row's end date* (used for the new chart line,
+see §9) — which reaches exactly `futureValue` on the final row.
+```js
+function simulate(goal, { sipOverride, buildRows = false } = {}) {
+  // … totalMonths / monthlyR / incRate / monthlyInfl setup …
+  const { lumpsumByMonth, sipDeltas } = contributionEvents(goal);
+  let bal = startCorpus, invested = startCorpus, sipPtr = 0, cumSipDelta = 0;
+  for (let k = 0; k < numPeriods; k++) {
+    const baseSip = startSip * Math.pow(1 + incRate, k);
+    for (let i = 0; i < monthsInRow; i++) {
+      const mAbs = baseAbs + periodStart + i;
+      while (sipPtr < sipDeltas.length && sipDeltas[sipPtr].absMonth <= mAbs) {
+        cumSipDelta += sipDeltas[sipPtr].delta; sipPtr++;
+      }
+      const sip = Math.max(0, baseSip + cumSipDelta); // SIP never goes negative
+      const lump = lumpsumByMonth.get(mAbs) || 0;
+      if (lump) { bal += lump; invested += lump; rowContribution += lump; }
+      bal = (bal + sip) * (1 + monthlyR);
+      rowContribution += sip; invested += sip;
+    }
+    // … push row with targetValue, or just track bal for the scalar-only path …
+  }
+  return { rows: rows || [], closingBal: bal };
+}
+export function buildProjection(goal, sipOverride) { return simulate(goal, { sipOverride, buildRows: true }).rows; }
+```
+
+**`calcGoal`** — `projectedCorpus = simulate(goal).closingBal`;
+`sipRequired` binary-searches over `simulate(goal, { sipOverride }).closingBal`
+(holding all logged contributions fixed — i.e. "what would the **base**
+monthly SIP need to be, given everything logged so far, to hit the target?");
+`lumpSumRequired` is a distinct hypothetical ("a one-time top-up on the
+starting corpus") using the full creation→target horizon, unchanged in spirit
+from the original pre-session formula. Returns `hasContributions` /
+`hasMappedAssets` flags for the UI note instead of the removed
+`rebased`/`anchorInv`/`anchorMonth`/`anchorYear` fields.
+
+**Removed:** `goalAnchor` (the old single-snapshot re-basing helper),
+`fvOfSipStream` (the old closed-form SIP-stream formula) — both fully
+superseded by `simulate`.
+
+### Files changed — `src/components/GoalDetail.jsx`
+- `CreateLog` rewritten: a **Type** selector (Lumpsum / SIP), **Date**, and a
+  signed **Amount** field (native number input, so a leading `-` is typed
+  directly — no separate +/- toggle). An **ⓘ info button** next to the
+  "Create Log" heading toggles an explanation panel describing both entry
+  types (exact copy is in `CONTRIB_TYPES` at the top of the file, edit there
+  to change the wording). The ledger table shows Date / Type badge
+  (amber=Lumpsum, indigo=SIP) / signed Amount (green if positive, red if
+  negative, `/mo` suffix for SIP rows) / Edit / Delete.
+- Removed the old "actual vs projected, ahead/behind" comparison entirely —
+  there's no more separate "actual value" to compare against a projection;
+  the contributions themselves **are** the plan now, so `periodOf`/`projAt`/
+  `actualByPeriod`/`ActualDot` were deleted along with it.
+- The note under the achievement bar changed from "Plan re-based to…" to a
+  simpler *"Includes logged contributions… / mapped assets… in the
+  calculation below"*, driven by `calcGoal`'s new `hasContributions` /
+  `hasMappedAssets` flags.
+- Added a **Mapped Assets** chip row in the hero card (visible whenever
+  `hasMappedAssets`), and swapped the "Current corpus" mini-stat for
+  **"Starting corpus"** (`c.startCorpus` = `currentInv + Σ mappedAssets`,
+  the actual number the simulation starts from).
+
+### Files changed — `src/App.jsx`
+- `onSaveActuals` → **`onSaveContributions`**: `GoalDetail`'s save callback
+  now writes `{ contributions, history }` instead of `{ actuals, history }`.
+- `<GoalFormModal>` now also receives `clientGoals={selectedClient.goals}`
+  (needed for §6's cross-goal availability).
+
+### Files changed — `src/services/db.js`
+`mapDbGoal` / `mapFrontendGoal` / `updateGoal` all gained `mappedAssets` ↔
+`mapped_assets` and `contributions` ↔ `contributions` translation, following
+the exact same pattern as every other goal field. The old `actuals` column
+mapping is **left in place, untouched** — old snapshot log entries aren't
+deleted, they're just no longer read by the calculation engine (harmless,
+inert data).
+
+### ⚠️ Required migration (Supabase only — confirmed necessary by testing)
+New file **`migration_goal_contributions.sql`** adds two columns to the
+`goals` table:
+```sql
+ALTER TABLE public.goals ADD COLUMN IF NOT EXISTS mapped_assets JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.goals ADD COLUMN IF NOT EXISTS contributions JSONB NOT NULL DEFAULT '[]'::jsonb;
+```
+**Run this once in the Supabase SQL editor before using Map Asset or Create
+Log on a Supabase-backed deployment** — I confirmed by direct query that
+saving a goal without it fails with `column goals.mapped_assets does not
+exist` (a clean `400`, caught by the existing `try/catch` → `alert(...)` in
+`App.jsx`, so it fails safely rather than crashing — but the feature won't
+persist until the migration runs). The localStorage fallback needs no
+migration; new fields just flow through automatically.
+
+### Verified (all via direct Node execution against the real `calc.js`, plus a live browser check)
+- Mapped assets correctly seed the starting corpus (`goalStartingCorpus` /
+  first row `openingBal`).
+- A lump-sum contribution adds exactly its amount into that period's
+  `Contribution` column and into the closing balance; a negative lump-sum
+  (withdrawal) correctly lowers the final closing balance versus a control
+  run with no contribution.
+- A SIP contribution permanently raises `monthlySip` in every row from its
+  date forward, by exactly the delta amount; SIP is floored at 0 (never
+  negative) even with a large decrease.
+- `calcGoal.projectedCorpus` exactly matches `buildProjection(goal)`'s last
+  row `closingBal`, and the last row's `targetValue` exactly matches
+  `futureValue` — both hold even with contributions and mapped assets active.
+- Cross-goal availability (§6): with Goal A mapping ₹20L of "Stocks / Shares"
+  out of a ₹72.88L holding, Goal B's Map Asset panel correctly shows ₹52.88L
+  available and lists "Vacation (₹20.00 L)" as already using the rest —
+  verified both via a live browser screenshot of the real UI and via an
+  isolated re-run of the exact `usageByLabel` reduce/filter logic.
+
+---
+
+## 9. Growth Projection Chart — three lines instead of two + an "actual" overlay
+
+### Change — `src/components/GoalDetail.jsx`
+Previously: **Closing Balance** (projected corpus) + **Total Invested**
+(principal) + an optional dotted **Actual** overlay line sourced from the old
+snapshot log (removed in §8). Now, three lines, all sourced straight from
+`buildProjection` rows (no separate data-fetching path):
+- **Target Value** (new) — `row.targetValue`, the inflation-adjusted goal
+  cost *as of that period's end date* — a dashed amber line, so you can see
+  the goal's cost rising to meet (or outrun) the corpus.
+- **Current Value** (renamed from "Closing Balance") — `row.closingBal`,
+  the projected corpus including every logged contribution and mapped asset.
+- **Invested Value** (renamed from "Total Invested") — `row.totalInvested`,
+  cumulative principal put in (SIP + lump sums, net of withdrawals).
+
+The legend and tooltip were updated to match the new labels/colors
+(Target Value: dashed `#f59e0b` amber, no fill; Current Value: solid blue/
+indigo area, same gradient as before; Invested Value: solid slate area, same
+gradient as before).

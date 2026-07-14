@@ -246,16 +246,17 @@ const getQualitativeNotes = (text, client) => {
   let cleaned = text.replace(fresh, '').trim();
   
   // If the fresh block didn't match perfectly, strip lines matching headers or bullets
-  if (cleaned.includes('Inflation rate:') || cleaned.includes('Expected return:') || cleaned.includes('SIP step-up rate:')) {
+  if (cleaned.includes('Inflation rate:') || cleaned.includes('Expected return:') || cleaned.includes('SIP step-up rate:') || cleaned.includes('Mapped Assets:')) {
     cleaned = cleaned.split('\n')
       .filter(line => {
         const l = line.trim();
-        return !l.startsWith('•') && 
-               !l.startsWith('*') && 
-               !l.startsWith('-') && 
-               !l.startsWith('Inflation rate') && 
-               !l.startsWith('Expected return') && 
-               !l.startsWith('SIP step-up rate');
+        return !l.startsWith('•') &&
+               !l.startsWith('*') &&
+               !l.startsWith('-') &&
+               !l.startsWith('Inflation rate') &&
+               !l.startsWith('Expected return') &&
+               !l.startsWith('SIP step-up rate') &&
+               !l.startsWith('Mapped Assets');
       })
       .join('\n')
       .trim();
@@ -328,6 +329,7 @@ function AssumptionsSection({ client, onSave, isViewer }) {
                       <th className="text-right px-5 py-3 font-bold">Inflation</th>
                       <th className="text-right px-5 py-3 font-bold">Exp. Return</th>
                       <th className="text-right px-5 py-3 font-bold">SIP Step-Up</th>
+                      <th className="text-left px-5 py-3 font-bold">Mapped Assets</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/50">
@@ -353,6 +355,19 @@ function AssumptionsSection({ client, onSave, isViewer }) {
                           <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/20 text-blue-700 dark:text-blue-400 ring-1 ring-blue-200/40 dark:ring-blue-900/20 text-xs font-bold">
                             {g.sipIncRate}%
                           </span>
+                        </td>
+                        <td className="px-5 py-3">
+                          {Array.isArray(g.mappedAssets) && g.mappedAssets.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5 max-w-xs">
+                              {g.mappedAssets.map(a => (
+                                <span key={a.id || a.label} className="inline-flex items-center px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/20 text-indigo-700 dark:text-indigo-400 ring-1 ring-indigo-200/40 dark:ring-indigo-900/20 text-[10px] font-bold whitespace-nowrap">
+                                  {a.label} · {fmtINR(a.amount)}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-slate-350 dark:text-slate-600 text-[10px] font-medium italic">None</span>
+                          )}
                         </td>
                       </tr>
                     ))}

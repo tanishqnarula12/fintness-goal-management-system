@@ -469,12 +469,12 @@ export default function App() {
               clientName={selectedClient.name}
               onBack={() => setSelectedGoalId(null)}
               onEdit={() => { setEditingGoalId(selectedGoalId); setShowGoalForm(true); }}
-              onSaveActuals={(actuals, changes) => {
+              onSaveContributions={(contributions, changes) => {
                 const prevHistory = Array.isArray(selectedGoal?.history) ? selectedGoal.history : [];
                 const history = (changes && changes.length)
                   ? [...prevHistory, { at: new Date().toISOString(), changes }]
                   : prevHistory;
-                handleUpdateGoal(selectedClientId, selectedGoalId, { actuals, history });
+                handleUpdateGoal(selectedClientId, selectedGoalId, { contributions, history });
               }}
               isViewer={isViewer}
             />
@@ -575,6 +575,7 @@ export default function App() {
         <GoalFormModal
           initial={editingGoalId ? selectedClient.goals.find(g => g.id === editingGoalId) : null}
           assetAllocation={selectedClient.assetAllocation}
+          clientGoals={selectedClient.goals}
           onClose={() => { setShowGoalForm(false); setEditingGoalId(null); }}
           onSave={(g) => {
             if (editingGoalId) {

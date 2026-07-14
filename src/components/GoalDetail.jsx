@@ -249,20 +249,24 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
                       </span>
                     </td>
                     <td className="px-6 py-3.5 text-right text-slate-650 dark:text-slate-350 tabular-nums">{fmtINR(r.openingBal)}</td>
-                    <td className={`px-6 py-3.5 text-right tabular-nums ${hasSipChange(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400 font-bold' : 'text-slate-650 dark:text-slate-350'}`}>
+                    <td className={`px-6 py-3.5 text-right tabular-nums ${hasSipChange(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400' : 'text-slate-650 dark:text-slate-350'}`}>
                       {fmtSip(r.monthlySip)}
                     </td>
-                    <td className="px-6 py-3.5 text-right tabular-nums">
-                      <span className={`inline-flex items-center justify-end gap-1.5 ${hasContrib(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400 font-bold' : 'text-slate-650 dark:text-slate-350'}`}>
-                        {fmtINR(r.yearContribution)}
-                        {hasContrib(r) && (
-                          <span
-                            title={contribRowHint(r.contributionsInRow)}
-                            className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-help no-underline"
-                          >
-                            <Info size={13} />
-                          </span>
-                        )}
+                    <td className="px-6 py-3.5 tabular-nums">
+                      <span className="flex items-center justify-end gap-1.5">
+                        <span className={hasContrib(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400' : 'text-slate-650 dark:text-slate-350'}>
+                          {fmtINR(r.yearContribution)}
+                        </span>
+                        <span className="w-[13px] shrink-0 inline-flex items-center justify-center">
+                          {hasContrib(r) && (
+                            <span
+                              title={contribRowHint(r.contributionsInRow)}
+                              className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-help"
+                            >
+                              <Info size={13} />
+                            </span>
+                          )}
+                        </span>
                       </span>
                     </td>
                     <td className="px-6 py-3.5 text-right text-emerald-600 dark:text-emerald-400 font-semibold tabular-nums">{fmtINR(r.growth)}</td>

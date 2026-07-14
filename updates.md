@@ -785,3 +785,35 @@ figure; hovering it showed `"SIP +₹1,000/mo from 1 Apr 2029"`. Confirmed via
 page-source inspection that the underline class and the icon's `no-underline`
 marker (so the icon itself doesn't inherit the text underline) were both
 present exactly once, on the correct row.
+
+### Follow-up fix — this introduced a column-alignment bug
+Two things in §12 broke the numeric columns' right-alignment:
+1. `font-bold` on the underlined cells made those numerals **visibly wider**
+   than the regular-weight numbers in every other row of the same column
+   (bold glyphs are wider even with `tabular-nums`, which only guarantees
+   equal digit width *within* one font weight, not across weights) — so the
+   affected row's numbers looked shifted left relative to the rest of the
+   column, even though the CSS right-edge was technically still correct.
+2. In the **Contribution** column specifically, the ⓘ icon was appended
+   *inside* the same `inline-flex justify-end` span as the number. `justify-
+   end` right-aligns the whole [number + icon] group, so on rows with the
+   icon, the icon (not the number) touched the cell's right edge and the
+   number itself sat ~19px further left than on rows without an icon — a
+   real, measurable misalignment, not just a visual illusion.
+
+Fixed both in `src/components/GoalDetail.jsx`:
+- Dropped `font-bold` from the underline styling on both the Monthly SIP and
+  Contribution cells — they're still colored blue and underlined to signal
+  "this changed," just at the same font weight as every other row, so
+  `tabular-nums` keeps every row's numeral width identical.
+- Contribution cell restructured so the icon lives in its own **fixed-width
+  reserved slot** (`w-[13px] shrink-0`) that's rendered on *every* row
+  (empty when there's no contribution, holding the icon when there is) —
+  the number's own span is right-aligned independently of whether that slot
+  is occupied, so its right edge never moves.
+
+**Verified with real pixel measurements**, not just a visual check: queried
+the bounding box of every row's Monthly SIP and Contribution `<td>` in a live
+browser render (12 rows, one with a logged SIP entry) — right edges came
+back **identical to the pixel** across all 12 rows in both columns (747px and
+933px respectively, in that test's layout), including the row with the icon.

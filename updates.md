@@ -786,6 +786,116 @@ page-source inspection that the underline class and the icon's `no-underline`
 marker (so the icon itself doesn't inherit the text underline) were both
 present exactly once, on the correct row.
 
+---
+
+## 13. Projection periods start the month AFTER creation
+
+### Intent
+A goal created in **May 2026** was labelled `May 2026 – May 2027` (an
+exclusive-end window). The desired reading is inclusive and starts the month
+after creation — money starts going in the month *after* you set the goal up:
+```
+Jun 2026 – May 2027
+Jun 2027 – May 2028
+Jun 2028 – May 2029  …
+```
+
+### Change — `src/utils/calc.js` → `simulate`
+- `baseAbs` (the creation month) is unchanged, but a new
+  `firstAbs = baseAbs + 1` is the **first contribution month**. All period
+  windows are now measured from `firstAbs`, so period *k* covers absolute
+  months `[firstAbs + k*12, firstAbs + k*12 + 11]`.
+- The row label switched from exclusive-end to **inclusive-end**:
+  `lastAbs = eAbs - 1`, label = `monthLabel(sAbs) – monthLabel(lastAbs)`.
+  `chartName` likewise uses the inclusive last month.
+- `targetValue` now uses `periodEnd` months elapsed from creation
+  (`amount * (1+monthlyInfl)^periodEnd`) rather than a `eAbs - baseAbs` span,
+  so the final row's `targetValue` still lands exactly on `futureValue`.
+- Month count, compounding count and therefore `projectedCorpus` are
+  unchanged — this is a *shift and relabel*, not a change to the maths.
+
+---
+
+## 14. Create Log: "Lumpsum" replaced by "Portfolio Valuation"
+
+### Intent
+Rather than logging a one-time contribution that compounds from mid-period,
+advisors wanted to record **a portfolio valuation on a date**, whose amount is
+added to the **closing balance** of the period that date falls in (and then
+compounds from the next period onward).
+
+### Changes — `src/utils/calc.js`
+- `contributionEvents` no longer builds a `lumpsumByMonth` map. Entry types
+  are now `'sip'` and `'valuation'`; **any non-`'sip'` type is read as a
+  valuation**, which means legacy `'lumpsum'` rows still count rather than
+  being silently dropped (verified by test).
+- Entries are grouped into `entriesByPeriod` once, up front, with clamping:
+  anything dated **before** the first contribution month falls into period 0,
+  anything past the target falls into the final period — so no entry can be
+  silently ignored (this matters now that periods start a month after
+  creation, e.g. a valuation dated in the creation month itself).
+- Inside the period loop, after the 12 monthly steps:
+  ```js
+  const valuationInRow = rowEntries.reduce((s, e) => s + (e.type === 'valuation' ? e.amount : 0), 0);
+  if (valuationInRow) bal += valuationInRow;
+  ```
+  i.e. it lands **on the closing balance**, with no in-period compounding.
+- `growth` now subtracts the valuation too, so each row satisfies
+  `closing = opening + contribution + growth + valuation` exactly (asserted in
+  testing). `valuationInRow` is exposed on the row for the UI.
+- `monthlySip` now reports the **post-change** rate when a SIP entry lands
+  mid-period (`lastSipInRow`), instead of the period's opening rate — the UI
+  underlines that cell as "changed", so it must show the new value. Rows
+  without a SIP change still report the opening rate (identical either way).
+
+### Changes — `src/components/GoalDetail.jsx`
+- `CONTRIB_TYPES` is now `Portfolio Valuation` / `SIP`; the ⓘ panel, the form
+  field label ("Valuation Amount (₹)"), the ledger's type badge, the edit-history
+  text and the intro copy all follow.
+- `contribRowHint(entries, only)` gained a type filter so each cell's tooltip
+  shows only the entries relevant to it. Valuation wording is
+  `"Portfolio valuation of +₹2,00,000 added on 26 May 2027"`.
+- The underline/ⓘ now tracks **where the number actually lands**:
+  - `hasSipChange(r)` → underlines **Monthly SIP** + **Contribution**, ⓘ on Contribution.
+  - `hasValuation(r)` → underlines **Closing Bal**, ⓘ on Closing Bal.
+  Both use the same fixed-width (`w-[13px]`) icon slot from §12 so column
+  alignment is unaffected whether or not an icon is present.
+
+---
+
+## 15. Growth chart now opens at the goal's creation month
+
+### Change — `src/components/GoalDetail.jsx`
+The chart's first x-axis tick was the *end* of period 0, so the year the goal
+was actually created never appeared. `chartData` now prepends an origin point
+at the creation month:
+```js
+{
+  name: `${MONTH_NAMES[createdM - 1]} '${String(createdY).slice(2)}`,
+  'Target Value': Math.round(Number(goal.amount) || 0),  // un-inflated cost at creation
+  'Current Value': Math.round(c.startCorpus),
+  'Invested Value': Math.round(c.startCorpus),
+}
+```
+(`MONTH_NAMES`, `CURRENT_MONTH`, `CURRENT_YEAR` added to the `calc` import.)
+So a goal created May 2026 now plots `May '26 → May '27 → … → May '36`.
+
+### Verified (§13–15, live browser, localStorage-only session)
+Seeded a goal created **14 May 2026** (target May 2036) and logged a
+**Portfolio Valuation of +₹2,00,000 on 26 May 2027**:
+- Period labels rendered `Jun 2026 – May 2027`, `Jun 2027 – May 2028`, … ✓
+- The valuation landed on the **Jun 2026 – May 2027** row, whose Closing Bal
+  (₹3.28 L) was underlined blue with the ⓘ beside it reading exactly
+  *"Portfolio valuation of +₹2,00,000 added on 26 May 2027"* ✓
+- The word "Lumpsum" no longer appears anywhere in the UI ✓
+- Chart x-axis starts at `May '26` ✓, all three area series render ✓
+Calc-engine tests additionally confirmed: the period-0 closing balance rises by
+*exactly* the valuation amount (no in-period compounding); every row satisfies
+`closing = opening + contribution + growth + valuation`;
+`calcGoal.projectedCorpus` still equals the last row's closing balance; legacy
+`lumpsum`-typed entries are still honoured; and a mid-period SIP change now
+displays the post-change rate on the row it lands in.
+
 ### Follow-up fix — this introduced a column-alignment bug
 Two things in §12 broke the numeric columns' right-alignment:
 1. `font-bold` on the underlined cells made those numerals **visibly wider**

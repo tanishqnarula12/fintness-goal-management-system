@@ -8,47 +8,64 @@ import {
 } from 'recharts';
 import { Card, btnSecondary, btnPrimary, inputCls, selectCls } from './UI';
 import {
-  calcGoal, buildProjection, monthLabel, fmtINR, fmtSip, fmtFull, goalEmoji, goalCreatedLabel, needsKidName, fmtDate, uid
+  calcGoal, buildProjection, monthLabel, fmtINR, fmtSip, fmtFull, goalEmoji, goalCreatedLabel, needsKidName, fmtDate, uid,
+  MONTH_NAMES, CURRENT_MONTH, CURRENT_YEAR
 } from '../utils/calc';
 
 // Human-readable explanation of every Create Log entry that landed inside a
 // projection row, e.g. "SIP +₹10,000/mo from 15 Jun 2027\nLumpsum +₹1,00,000 on 3 Aug 2027"
 // — shown on the row's blue info icon so the row-over-row jump can be traced
 // straight back to the log entry that caused it.
-function contribRowHint(entries) {
-  return entries.map(e => {
-    const sign = e.amount >= 0 ? '+' : '−';
-    const amt = `${sign}${fmtFull(Math.abs(e.amount))}`;
-    return e.type === 'sip'
-      ? `SIP ${amt}/mo from ${fmtDate(e.date) || e.date}`
-      : `Lumpsum ${amt} on ${fmtDate(e.date) || e.date}`;
-  }).join('\n');
+function contribRowHint(entries, only) {
+  return entries
+    .filter(e => !only || e.type === only)
+    .map(e => {
+      const sign = e.amount >= 0 ? '+' : '−';
+      const amt = `${sign}${fmtFull(Math.abs(e.amount))}`;
+      return e.type === 'sip'
+        ? `SIP ${amt}/mo from ${fmtDate(e.date) || e.date}`
+        : `Portfolio valuation of ${amt} added on ${fmtDate(e.date) || e.date}`;
+    })
+    .join('\n');
 }
 
-// Does this projection row contain a logged contribution at all?
+// Does this projection row contain a logged entry at all?
 const hasContrib = (r) => !!(r.contributionsInRow && r.contributionsInRow.length > 0);
-// Does it specifically contain a SIP change (drives the Monthly SIP underline)?
+// A SIP change drives the Monthly SIP + Contribution underline …
 const hasSipChange = (r) => !!(r.contributionsInRow && r.contributionsInRow.some(e => e.type === 'sip'));
+// … while a portfolio valuation drives the Closing Bal underline (that's where it lands).
+const hasValuation = (r) => !!(r.contributionsInRow && r.contributionsInRow.some(e => e.type === 'valuation'));
 
 export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveContributions, isViewer }) {
   const c = calcGoal(goal);
   const projection = buildProjection(goal);
   const remainingLabel = c.years >= 1 ? `${c.years.toFixed(1)} years to go` : c.months > 0 ? `${c.months} months to go` : 'Due now';
 
-  // Create Log — a ledger of real contribution events (lump sums / SIP
-  // changes) that feed directly into the simulation above.
+  // Create Log — a ledger of real events (portfolio valuations / SIP changes)
+  // that feed directly into the simulation above.
   const contributions = Array.isArray(goal.contributions) ? goal.contributions : [];
 
   // Format data for Recharts — three lines: what the goal will cost (Target
   // Value, inflating over time), where the corpus actually is given every
-  // logged contribution (Current Value), and how much principal has gone in
-  // (Invested Value).
-  const chartData = projection.map(r => ({
-    name: r.chartName,
-    'Target Value': Math.round(r.targetValue),
-    'Current Value': Math.round(r.closingBal),
-    'Invested Value': Math.round(r.totalInvested),
-  }));
+  // logged entry (Current Value), and how much principal has gone in
+  // (Invested Value). The series opens at the goal's CREATION month so the
+  // chart shows the year the goal started from, not just the first period end.
+  const createdM = goal.createdMonth || CURRENT_MONTH;
+  const createdY = goal.createdYear || CURRENT_YEAR;
+  const chartData = projection.length === 0 ? [] : [
+    {
+      name: `${MONTH_NAMES[createdM - 1]} '${String(createdY).slice(2)}`,
+      'Target Value': Math.round(Number(goal.amount) || 0),
+      'Current Value': Math.round(c.startCorpus),
+      'Invested Value': Math.round(c.startCorpus),
+    },
+    ...projection.map(r => ({
+      name: r.chartName,
+      'Target Value': Math.round(r.targetValue),
+      'Current Value': Math.round(r.closingBal),
+      'Invested Value': Math.round(r.totalInvested),
+    })),
+  ];
 
   // Custom Tooltip Formatter
   const formatTooltipValue = (value) => {
@@ -234,7 +251,7 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
               </thead>
               <tbody className="divide-y divide-slate-200/50 dark:divide-slate-800/50">
                 {projection.map((r, i) => (
-                  <tr key={i} className={`hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors ${r.contributionsInRow && r.contributionsInRow.length > 0 ? 'bg-blue-50/40 dark:bg-blue-950/10' : ''}`}>
+                  <tr key={i} className={`hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors ${hasContrib(r) ? 'bg-blue-50/40 dark:bg-blue-950/10' : ''}`}>
                     <td className="px-6 py-3.5 font-bold text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
                       <span className="inline-flex items-center gap-1.5">
                         {r.label}
@@ -254,13 +271,13 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
                     </td>
                     <td className="px-6 py-3.5 tabular-nums">
                       <span className="flex items-center justify-end gap-1.5">
-                        <span className={hasContrib(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400' : 'text-slate-650 dark:text-slate-350'}>
+                        <span className={hasSipChange(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400' : 'text-slate-650 dark:text-slate-350'}>
                           {fmtINR(r.yearContribution)}
                         </span>
                         <span className="w-[13px] shrink-0 inline-flex items-center justify-center">
-                          {hasContrib(r) && (
+                          {hasSipChange(r) && (
                             <span
-                              title={contribRowHint(r.contributionsInRow)}
+                              title={contribRowHint(r.contributionsInRow, 'sip')}
                               className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-help"
                             >
                               <Info size={13} />
@@ -270,7 +287,23 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
                       </span>
                     </td>
                     <td className="px-6 py-3.5 text-right text-emerald-600 dark:text-emerald-400 font-semibold tabular-nums">{fmtINR(r.growth)}</td>
-                    <td className="px-6 py-3.5 text-right font-bold text-slate-900 dark:text-white tabular-nums">{fmtINR(r.closingBal)}</td>
+                    <td className="px-6 py-3.5 tabular-nums">
+                      <span className="flex items-center justify-end gap-1.5">
+                        <span className={hasValuation(r) ? 'underline decoration-blue-500 decoration-2 underline-offset-4 text-blue-700 dark:text-blue-400 font-bold' : 'font-bold text-slate-900 dark:text-white'}>
+                          {fmtINR(r.closingBal)}
+                        </span>
+                        <span className="w-[13px] shrink-0 inline-flex items-center justify-center">
+                          {hasValuation(r) && (
+                            <span
+                              title={contribRowHint(r.contributionsInRow, 'valuation')}
+                              className="text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-help"
+                            >
+                              <Info size={13} />
+                            </span>
+                          )}
+                        </span>
+                      </span>
+                    </td>
                   </tr>
                 ))}
                 {projection.length === 0 && (
@@ -290,15 +323,15 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
 }
 
 const CONTRIB_TYPES = [
-  { id: 'lumpsum', label: 'Lumpsum', hint: 'A one-time amount added to the corpus. Enter a minus sign to record a withdrawal.' },
-  { id: 'sip', label: 'SIP', hint: "A permanent change to the ongoing monthly SIP from this date forward. Positive = increase, minus = decrease." },
+  { id: 'valuation', label: 'Portfolio Valuation', hint: 'A portfolio value recorded on a date. The amount is added to the closing balance of the period it falls in, and compounds from there. Enter a minus sign to record a reduction.' },
+  { id: 'sip', label: 'SIP', hint: 'A permanent change to the ongoing monthly SIP from this date forward. Positive = increase, minus = decrease.' },
 ];
 
-// "Create Log" — a ledger of real contribution events (lump sums / SIP
-// changes) that feed directly into the simulation, not just chart annotations.
+// "Create Log" — a ledger of real events (portfolio valuations / SIP changes)
+// that feed directly into the simulation, not just chart annotations.
 function CreateLog({ contributions, onSave, isViewer }) {
   const [editingId, setEditingId] = useState(null); // entry id, or 'new', or null
-  const [type, setType] = useState('lumpsum');
+  const [type, setType] = useState('valuation');
   const [date, setDate] = useState('');
   const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
@@ -308,14 +341,14 @@ function CreateLog({ contributions, onSave, isViewer }) {
 
   const startAdd = () => {
     setEditingId('new');
-    setType('lumpsum');
+    setType('valuation');
     setDate(new Date().toISOString().slice(0, 10));
     setAmount('');
     setError('');
   };
   const startEdit = (e) => {
     setEditingId(e.id);
-    setType(e.type === 'sip' ? 'sip' : 'lumpsum');
+    setType(e.type === 'sip' ? 'sip' : 'valuation');
     setDate((e.date || '').slice(0, 10));
     setAmount(String(e.amount ?? ''));
     setError('');
@@ -325,7 +358,7 @@ function CreateLog({ contributions, onSave, isViewer }) {
   const fmtEntry = (t, d, a) => {
     const amt = Number(a) || 0;
     const sign = amt >= 0 ? '+' : '−';
-    return `${t === 'sip' ? 'SIP' : 'Lumpsum'} ${sign}${fmtFull(Math.abs(amt))} on ${fmtDate(d) || d}`;
+    return `${t === 'sip' ? 'SIP' : 'Portfolio valuation'} ${sign}${fmtFull(Math.abs(amt))} on ${fmtDate(d) || d}`;
   };
 
   const save = () => {
@@ -355,7 +388,7 @@ function CreateLog({ contributions, onSave, isViewer }) {
 
   const EntryForm = (
     <div className="flex flex-col sm:flex-row sm:items-end gap-3 p-4 rounded-xl bg-slate-50/80 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800">
-      <div className="w-full sm:w-36 space-y-1.5">
+      <div className="w-full sm:w-44 space-y-1.5">
         <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Type</label>
         <div className="relative">
           <select value={type} onChange={(e) => setType(e.target.value)} className={selectCls}>
@@ -369,7 +402,7 @@ function CreateLog({ contributions, onSave, isViewer }) {
       </div>
       <div className="flex-1 space-y-1.5">
         <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-          {type === 'sip' ? 'SIP Change (₹/mo)' : 'Lumpsum Amount (₹)'}
+          {type === 'sip' ? 'SIP Change (₹/mo)' : 'Valuation Amount (₹)'}
         </label>
         <input type="number" step="any" value={amount} placeholder={type === 'sip' ? 'e.g. 5000 or -2000' : 'e.g. 100000 or -50000'} onChange={(e) => setAmount(e.target.value)} className={inputCls} />
       </div>
@@ -409,7 +442,7 @@ function CreateLog({ contributions, onSave, isViewer }) {
           </div>
         ) : (
           <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-            Log real contribution changes — every entry is applied to the calculation from its date forward, not just plotted on the chart.
+            Log real portfolio valuations and SIP changes — every entry is applied to the calculation from its date forward, not just plotted on the chart.
           </p>
         )}
 
@@ -449,7 +482,7 @@ function CreateLog({ contributions, onSave, isViewer }) {
                         <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[10px] font-bold rounded-full ${e.type === 'sip'
                           ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400 ring-1 ring-indigo-200/50 dark:ring-indigo-900/40'
                           : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 ring-1 ring-amber-200/50 dark:ring-amber-900/40'}`}>
-                          {e.type === 'sip' ? 'SIP' : 'Lumpsum'}
+                          {e.type === 'sip' ? 'SIP' : 'Portfolio Valuation'}
                         </span>
                       </td>
                       <td className={`px-3 py-3.5 text-right font-bold tabular-nums ${positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>

@@ -153,15 +153,19 @@ export function goalStartingCorpus(goal) {
   return base + mapped;
 }
 
-// Parse a goal's "Create Log" contribution entries into simulation-ready
-// shape: a Map of absolute-month -> summed lump-sum amount (signed; negative
-// = withdrawal), a date-sorted list of SIP deltas (signed; negative = a
-// decrease to the running monthly SIP from that month forward), and the
-// original entries (each tagged with its absolute month) so callers can
-// attribute a period's numbers back to the exact log entries that caused them.
+// Parse a goal's "Create Log" entries into simulation-ready shape: a
+// date-sorted list of SIP deltas (signed; negative = a decrease to the running
+// monthly SIP from that month forward), plus the original entries (each tagged
+// with its absolute month) so callers can attribute a period's numbers back to
+// the exact log entries that caused them.
+// Two entry types:
+//   - 'sip'       — permanently shifts the ongoing monthly SIP from that month.
+//   - 'valuation' — a portfolio valuation recorded on a date; its amount is
+//                   added to the CLOSING BALANCE of the period it falls in.
+// Legacy 'lumpsum' entries (from the previous log model) are read as
+// valuations so no historical data is silently dropped.
 function contributionEvents(goal) {
   const contributions = Array.isArray(goal.contributions) ? goal.contributions : [];
-  const lumpsumByMonth = new Map();
   const sipDeltas = [];
   const entries = [];
   contributions.forEach(c => {
@@ -170,26 +174,26 @@ function contributionEvents(goal) {
     const amt = Number(c.amount) || 0;
     if (!amt) return;
     const absMonth = d.getFullYear() * 12 + d.getMonth();
-    entries.push({ id: c.id, type: c.type, date: c.date, amount: amt, absMonth });
-    if (c.type === 'lumpsum') {
-      lumpsumByMonth.set(absMonth, (lumpsumByMonth.get(absMonth) || 0) + amt);
-    } else if (c.type === 'sip') {
-      sipDeltas.push({ absMonth, delta: amt });
-    }
+    const type = c.type === 'sip' ? 'sip' : 'valuation';
+    entries.push({ id: c.id, type, date: c.date, amount: amt, absMonth });
+    if (type === 'sip') sipDeltas.push({ absMonth, delta: amt });
   });
   sipDeltas.sort((a, b) => a.absMonth - b.absMonth);
   entries.sort((a, b) => a.absMonth - b.absMonth);
-  return { lumpsumByMonth, sipDeltas, entries };
+  return { sipDeltas, entries };
 }
 
 // Single source of truth for the goal's growth simulation — used by both
 // calcGoal (projected corpus / SIP search, row-building skipped for speed)
-// and buildProjection (the year-by-year table, row-building on). The grid
-// always starts at the goal's CREATION month and steps the base SIP up on
-// each creation anniversary. Logged "Create Log" contributions are layered
-// on top month-by-month as they occur: a lump-sum event adds/removes its
-// amount from the balance the month it was logged; a SIP event permanently
-// shifts the running monthly SIP (up or down) from that month forward.
+// and buildProjection (the year-by-year table, row-building on).
+//
+// Contributions begin the month AFTER the goal is created, so a goal created
+// in May 2026 yields periods "Jun 2026 – May 2027", "Jun 2027 – May 2028", …
+// (each label is an inclusive 12-month window). The base SIP steps up on each
+// anniversary. Logged entries are layered on as they occur: a SIP entry
+// permanently shifts the running monthly SIP from its month forward; a
+// portfolio valuation is added to that period's closing balance and then
+// compounds from the next period onward.
 function simulate(goal, { sipOverride, buildRows = false } = {}) {
   const createdM = goal.createdMonth || CURRENT_MONTH;
   const createdY = goal.createdYear || CURRENT_YEAR;
@@ -204,9 +208,22 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
   const inflation = (Number(goal.inflation) || 0) / 100;
   const monthlyInfl = Math.pow(1 + inflation, 1 / 12) - 1;
   const amount = Number(goal.amount) || 0;
-  const baseAbs = createdY * 12 + (createdM - 1);
+  const baseAbs = createdY * 12 + (createdM - 1); // the creation month itself
+  const firstAbs = baseAbs + 1;                   // first contribution month
   const startSip = sipOverride !== undefined ? sipOverride : (Number(goal.currentSip) || 0);
-  const { lumpsumByMonth, sipDeltas, entries } = contributionEvents(goal);
+  const { sipDeltas, entries } = contributionEvents(goal);
+
+  const numPeriods = Math.ceil(totalMonths / 12);
+  // Attribute every logged entry to a period, clamping anything dated before
+  // the first contribution month into period 0 and anything past the target
+  // into the final period, so no entry is ever silently ignored.
+  const entriesByPeriod = new Map();
+  entries.forEach(e => {
+    const rel = e.absMonth - firstAbs;
+    const k = rel < 0 ? 0 : Math.min(Math.floor(rel / 12), numPeriods - 1);
+    if (!entriesByPeriod.has(k)) entriesByPeriod.set(k, []);
+    entriesByPeriod.get(k).push(e);
+  });
 
   let bal = startCorpus;
   let invested = startCorpus;
@@ -214,40 +231,46 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
   let cumSipDelta = 0;
   const rows = buildRows ? [] : null;
 
-  const numPeriods = Math.ceil(totalMonths / 12);
   for (let k = 0; k < numPeriods; k++) {
-    const baseSip = startSip * Math.pow(1 + incRate, k); // stepped up on each creation anniversary
+    const baseSip = startSip * Math.pow(1 + incRate, k); // stepped up on each anniversary
     const periodStart = k * 12;
     const periodEnd = Math.min((k + 1) * 12, totalMonths);
     const monthsInRow = periodEnd - periodStart;
+    const sAbs = firstAbs + periodStart;
+    const eAbs = firstAbs + periodEnd; // exclusive
 
     const openingBal = bal;
     let rowContribution = 0;
     let firstSipInRow = null;
+    let lastSipInRow = null;
     for (let i = 0; i < monthsInRow; i++) {
-      const mAbs = baseAbs + periodStart + i;
+      const mAbs = sAbs + i;
       while (sipPtr < sipDeltas.length && sipDeltas[sipPtr].absMonth <= mAbs) {
         cumSipDelta += sipDeltas[sipPtr].delta;
         sipPtr++;
       }
       const sip = Math.max(0, baseSip + cumSipDelta);
       if (firstSipInRow === null) firstSipInRow = sip;
-      const lump = lumpsumByMonth.get(mAbs) || 0;
-      if (lump) { bal += lump; invested += lump; rowContribution += lump; }
+      lastSipInRow = sip;
       bal = (bal + sip) * (1 + monthlyR);
       rowContribution += sip;
       invested += sip;
     }
 
+    // Portfolio valuations land on this period's closing balance.
+    const rowEntries = entriesByPeriod.get(k) || [];
+    const valuationInRow = rowEntries.reduce((s, e) => s + (e.type === 'valuation' ? e.amount : 0), 0);
+    if (valuationInRow) bal += valuationInRow;
+    // When a SIP change lands mid-period, report the post-change rate — that's
+    // the figure the UI underlines as "changed", so it must show the new value.
+    const sipChangedInRow = rowEntries.some(e => e.type === 'sip');
+    const displaySip = sipChangedInRow ? lastSipInRow : firstSipInRow;
+
     if (buildRows) {
-      const sAbs = baseAbs + periodStart;
-      const eAbs = baseAbs + periodEnd;
+      const lastAbs = eAbs - 1; // inclusive last month of the window
       const startMonth = (sAbs % 12) + 1, startYr = Math.floor(sAbs / 12);
-      const endMonth = (eAbs % 12) + 1, endYr = Math.floor(eAbs / 12);
-      const targetValue = amount * Math.pow(1 + monthlyInfl, eAbs - baseAbs);
-      // Which logged Create Log entries landed in this period — lets the UI
-      // show, right on the row, exactly what caused its numbers to move.
-      const contributionsInRow = entries.filter(e => e.absMonth >= sAbs && e.absMonth < eAbs);
+      const endMonth = (lastAbs % 12) + 1, endYr = Math.floor(lastAbs / 12);
+      const targetValue = amount * Math.pow(1 + monthlyInfl, periodEnd);
       rows.push({
         periodIndex: k,
         startMonth, startYear: startYr,
@@ -258,13 +281,16 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
         monthsCovered: monthsInRow,
         isPartial: monthsInRow < 12,
         openingBal,
-        monthlySip: firstSipInRow ?? baseSip,
+        monthlySip: displaySip ?? baseSip,
         yearContribution: rowContribution,
-        growth: bal - openingBal - rowContribution,
+        // Growth stays purely return-driven — the valuation adjustment is
+        // reported separately so closing = opening + contribution + growth + valuation.
+        growth: bal - openingBal - rowContribution - valuationInRow,
         closingBal: bal,
         totalInvested: invested,
         targetValue,
-        contributionsInRow,
+        valuationInRow,
+        contributionsInRow: rowEntries,
       });
     }
   }

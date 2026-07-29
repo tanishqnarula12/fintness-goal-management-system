@@ -896,6 +896,122 @@ Calc-engine tests additionally confirmed: the period-0 closing balance rises by
 `lumpsum`-typed entries are still honoured; and a mid-period SIP change now
 displays the post-change rate on the row it lands in.
 
+---
+
+## 16. Three calculation bugs: SIP step-up, valuation double-counting, additionalSip
+
+Follow-up report after §13–15 shipped, testing the feature for real:
+1. "if i added portfolio valuation then compounding is not happening" — traced
+   to §16.2 below (multiple valuations were being summed, producing numbers
+   that didn't look like clean compounding).
+2. "sip is not stepping up like if i added sip its not stepping up" — a real
+   bug: the annual step-up only ever compounded the *original* base SIP; a
+   manually logged SIP increase sat on top as a flat, permanently-frozen
+   add-on that never itself grew.
+3. "if i added new portfolio valuation... avoid the previous one" — multiple
+   valuation entries were being **summed**, which double/triple-counts the
+   same portfolio (each valuation is a snapshot of the *same* money, not a
+   separate cash injection) — only the most recent one should count.
+4. "check if additional sip is updating accordingly to all this" — verification
+   pass on `calcGoal.additionalSip`/`sipRequired` against all of the above.
+
+### Fix 1 — SIP step-up now compounds the *current* value, not just the base
+**`src/utils/calc.js` → `simulate`.** Previously: `baseSip = startSip *
+(1+incRate)^k`, with a separately-tracked `cumSipDelta` added flat on top
+forever — so a manual SIP change never itself received a future step-up.
+Replaced with a single running value:
+```js
+let currentSip = startSip;
+for (let k = 0; k < numPeriods; k++) {
+  if (k > 0) currentSip = currentSip * (1 + incRate); // step-up applies to whatever it currently is
+  for (let i = 0; i < monthsInRow; i++) {
+    while (sipPtr < sipDeltas.length && sipDeltas[sipPtr].absMonth <= mAbs) {
+      currentSip = Math.max(0, currentSip + sipDeltas[sipPtr].delta);
+      sipPtr++;
+    }
+    const sip = currentSip;
+    …
+  }
+}
+```
+Now a logged SIP change becomes the new baseline, and the *next* anniversary's
+step-up compounds the whole thing (base + manual change) together — e.g. SIP
+10,000 → step-ups to 12,100 → +5,000 logged mid-period → 17,100 → **next**
+step-up is `17,100 × 1.1 = 18,810`, not the old buggy `13,310 + 5,000 =
+18,310`. Verified directly against this exact scenario.
+
+### Fix 2 — only the latest portfolio valuation counts (older ones voided)
+**`src/utils/calc.js`** — new exported helper:
+```js
+export function activeValuationId(contributions) {
+  let latest = null;
+  (Array.isArray(contributions) ? contributions : []).forEach(c => {
+    if (c.type === 'sip') return;
+    if (!Number(c.amount)) return;
+    const d = new Date(c.date);
+    if (isNaN(d.getTime())) return;
+    if (!latest || d > new Date(latest.date)) latest = c;
+  });
+  return latest ? latest.id : null;
+}
+```
+`contributionEvents` now calls this once and **drops every valuation entry
+except the active one** before building `entries`/`sipDeltas` — so a
+superseded valuation never reaches the simulation, `entriesByPeriod`,
+`contributionsInRow`, or `valuationInRow` at all; it's as if it were never
+logged, for calculation purposes. SIP entries are unaffected — every SIP entry
+still stacks/compounds, since each is a real, separate change over time
+(unlike valuations, which are repeated snapshots of the *same* thing).
+
+This is a **single source of truth** used by both the simulation and the UI —
+see below — so the "which one is active" logic can never drift between the
+two.
+
+### Fix 3 — Create Log ledger shows superseded valuations
+**`src/components/GoalDetail.jsx`** — `activeValuationId` imported from
+`calc.js` and called once per render:
+```js
+const activeValId = activeValuationId(contributions);
+```
+Any valuation entry whose `id !== activeValId` renders at 50% row opacity with
+a gray **"Superseded"** pill next to its type badge (title: *"A newer
+portfolio valuation exists — this one no longer affects the calculation"*).
+The entry is **not deleted** — it stays in `goal.contributions` and visible in
+the ledger for audit purposes; it's excluded purely from the math. SIP entries
+are never marked superseded. The ⓘ info-panel copy for both entry types was
+updated to describe this behaviour up front (valuation: *"Only the most
+recent valuation counts — logging a new one supersedes any earlier ones"*;
+SIP: *"Every future annual step-up applies to the new, updated SIP amount"*).
+
+### Fix 4 — verified `additionalSip` end-to-end
+Since `calcGoal.sipRequired`/`additionalSip` both route through the same
+`simulate()` used above, no separate fix was needed there — but it was
+explicitly re-verified rather than assumed:
+- Logging a large valuation → `additionalSip` drops (verified: went negative,
+  i.e. now over-funded, on a ₹20L valuation against a goal that previously
+  needed ₹16,536/mo more).
+- Logging a SIP increase → `additionalSip` drops accordingly.
+- Logging **two** valuations → `additionalSip` is byte-for-byte identical to
+  a run with **only the latest** valuation present, proving the superseded
+  one truly contributes nothing (not even partially).
+
+### Verified (calc-engine tests + live browser, localStorage-only session)
+7 targeted tests, all passing: (A) SIP step-up compounds inclusive of a
+manual change; (B) a single valuation's effect vs. no-valuation grows every
+year (real compounding); (C) with two valuations logged, the closing-balance
+diff at the landing period is *exactly* the latest valuation's amount (not
+the sum of both), and continues compounding cleanly afterward; (D)/(E)
+`additionalSip` responds correctly to a valuation and to a SIP change
+respectively; (F) `additionalSip` with two valuations logged matches a
+control run with only the latest present; (G) `calcGoal.projectedCorpus`
+still equals the last projection row's `closingBal` across every scenario
+above. Live browser test: logged valuation #1 (₹2,00,000, 26 May 2027), then
+valuation #2 (₹1,50,000, 26 May 2029), then a SIP +₹5,000 (1 Jul 2028) — the
+ledger showed #1 faded with a "Superseded" badge, #2 active; the "Jun 2028 –
+May 2029" table row correctly showed **both** the SIP-driven Monthly
+SIP/Contribution underline (₹17,100 = 12,100 stepped-up base + 5,000) and the
+valuation-driven Closing Bal underline simultaneously, with no console errors.
+
 ### Follow-up fix — this introduced a column-alignment bug
 Two things in §12 broke the numeric columns' right-alignment:
 1. `font-bold` on the underlined cells made those numerals **visibly wider**

@@ -153,6 +153,24 @@ export function goalStartingCorpus(goal) {
   return base + mapped;
 }
 
+// Among a goal's logged "Create Log" entries, the single portfolio valuation
+// that actually counts toward the calculation — the one with the latest date.
+// Earlier valuations are superseded: they stay visible in the ledger for
+// audit purposes, but are excluded from the simulation entirely (they are
+// point-in-time snapshots of the same portfolio, not separate cash events, so
+// they must never be summed together).
+export function activeValuationId(contributions) {
+  let latest = null;
+  (Array.isArray(contributions) ? contributions : []).forEach(c => {
+    if (c.type === 'sip') return;
+    if (!Number(c.amount)) return;
+    const d = new Date(c.date);
+    if (isNaN(d.getTime())) return;
+    if (!latest || d > new Date(latest.date)) latest = c;
+  });
+  return latest ? latest.id : null;
+}
+
 // Parse a goal's "Create Log" entries into simulation-ready shape: a
 // date-sorted list of SIP deltas (signed; negative = a decrease to the running
 // monthly SIP from that month forward), plus the original entries (each tagged
@@ -162,10 +180,14 @@ export function goalStartingCorpus(goal) {
 //   - 'sip'       — permanently shifts the ongoing monthly SIP from that month.
 //   - 'valuation' — a portfolio valuation recorded on a date; its amount is
 //                   added to the CLOSING BALANCE of the period it falls in.
+//                   Only the latest valuation (activeValuationId) is kept —
+//                   superseded ones are dropped here so they never reach the
+//                   simulation or row-attribution logic.
 // Legacy 'lumpsum' entries (from the previous log model) are read as
 // valuations so no historical data is silently dropped.
 function contributionEvents(goal) {
   const contributions = Array.isArray(goal.contributions) ? goal.contributions : [];
+  const activeId = activeValuationId(contributions);
   const sipDeltas = [];
   const entries = [];
   contributions.forEach(c => {
@@ -173,8 +195,9 @@ function contributionEvents(goal) {
     if (isNaN(d.getTime())) return;
     const amt = Number(c.amount) || 0;
     if (!amt) return;
-    const absMonth = d.getFullYear() * 12 + d.getMonth();
     const type = c.type === 'sip' ? 'sip' : 'valuation';
+    if (type === 'valuation' && c.id !== activeId) return; // superseded — excluded from calculation
+    const absMonth = d.getFullYear() * 12 + d.getMonth();
     entries.push({ id: c.id, type, date: c.date, amount: amt, absMonth });
     if (type === 'sip') sipDeltas.push({ absMonth, delta: amt });
   });
@@ -189,11 +212,19 @@ function contributionEvents(goal) {
 //
 // Contributions begin the month AFTER the goal is created, so a goal created
 // in May 2026 yields periods "Jun 2026 – May 2027", "Jun 2027 – May 2028", …
-// (each label is an inclusive 12-month window). The base SIP steps up on each
-// anniversary. Logged entries are layered on as they occur: a SIP entry
-// permanently shifts the running monthly SIP from its month forward; a
-// portfolio valuation is added to that period's closing balance and then
-// compounds from the next period onward.
+// (each label is an inclusive 12-month window).
+//
+// The monthly SIP is tracked as a single running value: it steps up by the
+// annual step-up rate at every anniversary, and a logged SIP entry shifts it
+// (up or down) from its month forward — crucially, the NEXT anniversary's
+// step-up applies to that new, already-adjusted value, not just the original
+// base. So a manual SIP increase keeps compounding at the normal step-up rate
+// from then on, exactly like the rest of the SIP.
+//
+// A portfolio valuation is added to the closing balance of the period it
+// falls in (no compounding within that same period — it's a checkpoint, not a
+// mid-period cash flow) and then compounds normally from the next period
+// onward like the rest of the corpus.
 function simulate(goal, { sipOverride, buildRows = false } = {}) {
   const createdM = goal.createdMonth || CURRENT_MONTH;
   const createdY = goal.createdYear || CURRENT_YEAR;
@@ -228,11 +259,11 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
   let bal = startCorpus;
   let invested = startCorpus;
   let sipPtr = 0;
-  let cumSipDelta = 0;
+  let currentSip = startSip; // running SIP: step-ups and manual deltas both compound into this
   const rows = buildRows ? [] : null;
 
   for (let k = 0; k < numPeriods; k++) {
-    const baseSip = startSip * Math.pow(1 + incRate, k); // stepped up on each anniversary
+    if (k > 0) currentSip = currentSip * (1 + incRate); // anniversary step-up on whatever the SIP currently is
     const periodStart = k * 12;
     const periodEnd = Math.min((k + 1) * 12, totalMonths);
     const monthsInRow = periodEnd - periodStart;
@@ -246,10 +277,10 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
     for (let i = 0; i < monthsInRow; i++) {
       const mAbs = sAbs + i;
       while (sipPtr < sipDeltas.length && sipDeltas[sipPtr].absMonth <= mAbs) {
-        cumSipDelta += sipDeltas[sipPtr].delta;
+        currentSip = Math.max(0, currentSip + sipDeltas[sipPtr].delta);
         sipPtr++;
       }
-      const sip = Math.max(0, baseSip + cumSipDelta);
+      const sip = currentSip;
       if (firstSipInRow === null) firstSipInRow = sip;
       lastSipInRow = sip;
       bal = (bal + sip) * (1 + monthlyR);
@@ -281,7 +312,7 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
         monthsCovered: monthsInRow,
         isPartial: monthsInRow < 12,
         openingBal,
-        monthlySip: displaySip ?? baseSip,
+        monthlySip: displaySip ?? currentSip,
         yearContribution: rowContribution,
         // Growth stays purely return-driven — the valuation adjustment is
         // reported separately so closing = opening + contribution + growth + valuation.

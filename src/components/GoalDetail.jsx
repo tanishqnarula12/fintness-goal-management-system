@@ -8,7 +8,7 @@ import {
 } from 'recharts';
 import { Card, btnSecondary, btnPrimary, inputCls, selectCls } from './UI';
 import {
-  calcGoal, buildProjection, monthLabel, fmtINR, fmtSip, fmtFull, goalEmoji, goalCreatedLabel, needsKidName, fmtDate, uid,
+  calcGoal, buildProjection, activeValuationId, monthLabel, fmtINR, fmtSip, fmtFull, goalEmoji, goalCreatedLabel, needsKidName, fmtDate, uid,
   MONTH_NAMES, CURRENT_MONTH, CURRENT_YEAR
 } from '../utils/calc';
 
@@ -323,8 +323,8 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
 }
 
 const CONTRIB_TYPES = [
-  { id: 'valuation', label: 'Portfolio Valuation', hint: 'A portfolio value recorded on a date. The amount is added to the closing balance of the period it falls in, and compounds from there. Enter a minus sign to record a reduction.' },
-  { id: 'sip', label: 'SIP', hint: 'A permanent change to the ongoing monthly SIP from this date forward. Positive = increase, minus = decrease.' },
+  { id: 'valuation', label: 'Portfolio Valuation', hint: 'A portfolio value recorded on a date. The amount is added to the closing balance of the period it falls in, and compounds from there. Enter a minus sign to record a reduction. Only the most recent valuation counts — logging a new one supersedes any earlier ones (they stay visible below but no longer affect the calculation).' },
+  { id: 'sip', label: 'SIP', hint: 'A permanent change to the ongoing monthly SIP from this date forward. Positive = increase, minus = decrease. Every future annual step-up applies to the new, updated SIP amount.' },
 ];
 
 // "Create Log" — a ledger of real events (portfolio valuations / SIP changes)
@@ -338,6 +338,9 @@ function CreateLog({ contributions, onSave, isViewer }) {
   const [showInfo, setShowInfo] = useState(false);
 
   const list = [...(contributions || [])].sort((a, b) => new Date(a.date) - new Date(b.date));
+  // Only the latest portfolio valuation counts toward the calculation — earlier
+  // ones are shown here for the record but marked superseded.
+  const activeValId = activeValuationId(contributions);
 
   const startAdd = () => {
     setEditingId('new');
@@ -475,17 +478,25 @@ function CreateLog({ contributions, onSave, isViewer }) {
                   }
                   const amt = Number(e.amount) || 0;
                   const positive = amt >= 0;
+                  const superseded = e.type !== 'sip' && e.id !== activeValId;
                   return (
-                    <tr key={e.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors">
+                    <tr key={e.id} className={`hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors ${superseded ? 'opacity-50' : ''}`}>
                       <td className="px-3 py-3.5 font-semibold text-slate-900 dark:text-slate-100">{fmtDate(e.date) || e.date}</td>
                       <td className="px-3 py-3.5">
-                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[10px] font-bold rounded-full ${e.type === 'sip'
-                          ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400 ring-1 ring-indigo-200/50 dark:ring-indigo-900/40'
-                          : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 ring-1 ring-amber-200/50 dark:ring-amber-900/40'}`}>
-                          {e.type === 'sip' ? 'SIP' : 'Portfolio Valuation'}
+                        <span className="inline-flex items-center gap-1.5 flex-wrap">
+                          <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[10px] font-bold rounded-full ${e.type === 'sip'
+                            ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400 ring-1 ring-indigo-200/50 dark:ring-indigo-900/40'
+                            : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 ring-1 ring-amber-200/50 dark:ring-amber-900/40'}`}>
+                            {e.type === 'sip' ? 'SIP' : 'Portfolio Valuation'}
+                          </span>
+                          {superseded && (
+                            <span title="A newer portfolio valuation exists — this one no longer affects the calculation" className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 ring-1 ring-slate-200/50 dark:ring-slate-700/50 cursor-help">
+                              Superseded
+                            </span>
+                          )}
                         </span>
                       </td>
-                      <td className={`px-3 py-3.5 text-right font-bold tabular-nums ${positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                      <td className={`px-3 py-3.5 text-right font-bold tabular-nums ${superseded ? 'text-slate-400 dark:text-slate-500' : positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
                         {positive ? '+' : '−'}{fmtFull(Math.abs(amt))}{e.type === 'sip' ? '/mo' : ''}
                       </td>
                       {!isViewer && (

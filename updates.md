@@ -1145,6 +1145,64 @@ but it meant real reads/writes were unreliable for a window of time on this
 machine specifically. Restored and double-checked against the live database
 before writing this section.
 
+---
+
+## 19. Real bug: Edit Goal modal's live preview silently ignored Create Log entries
+
+### The bug
+Reported as "Additional SIP is showing incorrectly" — the number on the
+GoalDetail page's hero card and the number in the "Edit Details" modal's live
+preview tiles disagreed for the exact same goal (₹1,26,487 vs ₹22,020 in one
+concrete case), with no obvious reason why.
+
+**Root cause — `src/components/Modals.jsx` → `GoalFormModal`.** When editing
+an existing goal, the modal's `form` state is built by explicitly listing out
+only the fields this form actually edits:
+```js
+const [form, setForm] = useState(() => initial ? {
+  name: initial.name, amount: initial.amount, targetMonth: initial.targetMonth || 1,
+  targetYear: initial.targetYear, inflation: initial.inflation, expectedReturn: initial.expectedReturn,
+  sipIncRate: initial.sipIncRate, currentInv: initial.currentInv, currentSip: initial.currentSip,
+  createdMonth: initial.createdMonth || CURRENT_MONTH, createdYear: initial.createdYear || CURRENT_YEAR,
+} : { … });
+```
+`contributions` (the Create Log ledger — every SIP change and portfolio
+valuation) was never copied into `form`. The live preview line —
+```js
+const previewCalc = calcGoal({ ...form, name: effectiveName, mappedAssets: mappedAssetsPayload });
+```
+— spreads `form`, so `previewCalc` computed as if **the goal had zero logged
+entries**, regardless of how many were actually saved. The GoalDetail page
+(which calls `calcGoal(goal)` on the full, real goal object) always showed
+the correct figure; only this modal's preview was wrong — a genuine
+inconsistency between two views of the same data, not a math/design question
+like §16–17 turned out to be.
+
+### Fix
+```js
+const previewCalc = calcGoal({ ...form, name: effectiveName, mappedAssets: mappedAssetsPayload, contributions: initial?.contributions || [] });
+```
+Deliberately scoped to the preview calculation only — `contributions` is
+**not** added to `form` itself, and `handleSave`'s saved payload still never
+includes it. Create Log entries are exclusively managed on the GoalDetail
+page; this form has no UI for editing them, so writing them back from here
+(even accidentally, via a stale `form` copy) risked silently overwriting the
+real ledger with an out-of-date snapshot. Confirmed `updateGoal()` in
+`src/services/db.js` only touches a `contributions` DB column when the update
+object explicitly includes that key — so leaving it out of the save payload
+(as before) is what keeps this fix from being able to affect saved data at all,
+by construction.
+
+### Verified
+Direct calc test against the real saved goal reproduced the exact split: the
+buggy spread computed ₹1,40,217 (matching "zero contributions" exactly, since
+that's precisely what it was silently doing), the fix computed ₹59,786
+(matching the GoalDetail page). Live browser test against the real database
+afterward (data had shifted again by then, from further live editing) showed
+**both** the GoalDetail hero card and the Edit modal's preview displaying the
+identical ₹22,020/mo, and a screenshot confirmed the modal's preview tiles
+match the Year-by-Year table below it line for line.
+
 ### Follow-up fix — this introduced a column-alignment bug
 Two things in §12 broke the numeric columns' right-alignment:
 1. `font-bold` on the underlined cells made those numerals **visibly wider**

@@ -177,7 +177,12 @@ export function GoalFormModal({ initial, assetAllocation, clientGoals, onClose, 
         .filter(x => x.amount > 0)
     : [];
 
-  const previewCalc = calcGoal({ ...form, name: effectiveName, mappedAssets: mappedAssetsPayload });
+  // `form` only tracks the fields this modal actually edits — it never carries
+  // Create Log entries (those are only ever edited on the GoalDetail page's
+  // Create Log section). Without this, the live preview here would silently
+  // ignore every logged SIP change / portfolio valuation and show numbers
+  // that don't match the goal's real, saved calculation.
+  const previewCalc = calcGoal({ ...form, name: effectiveName, mappedAssets: mappedAssetsPayload, contributions: initial?.contributions || [] });
   const targetBeforeStart = monthsBetween(form.createdMonth, form.createdYear, form.targetMonth, form.targetYear) <= 0;
 
   const handleSave = () => {

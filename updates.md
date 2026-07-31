@@ -1012,6 +1012,66 @@ May 2029" table row correctly showed **both** the SIP-driven Monthly
 SIP/Contribution underline (₹17,100 = 12,100 stepped-up base + 5,000) and the
 valuation-driven Closing Bal underline simultaneously, with no console errors.
 
+---
+
+## 17. Portfolio valuation now compounds within its own period too
+
+### The bug
+§14/§16 added a valuation to the **closing balance of the period it falls
+in** — but that add happened *after* the whole 12-month loop for that period
+had already finished. So a valuation logged in, say, August earned **zero**
+growth for the remaining 9 months of that Jun–May period; it only started
+compounding from the *next* period onward. Reported: "if I am adding 30,000
+in August... compounding must be done on that also... currently directly
+30,000 is adding directly in the closing balance."
+
+### The fix — `src/utils/calc.js` → `simulate`
+The valuation is now applied **inside** the month loop, at its exact month —
+before that month's growth is applied — so it starts earning a return
+immediately, for whatever's left of the period and every period after:
+```js
+const valuationByMonth = new Map(); // exact-month lookup, clamped into the simulated range
+entries.forEach(e => {
+  if (e.type !== 'valuation') return;
+  const mAbs = Math.max(firstAbs, Math.min(e.absMonth, lastValidAbs));
+  valuationByMonth.set(mAbs, (valuationByMonth.get(mAbs) || 0) + e.amount);
+});
+…
+for (let i = 0; i < monthsInRow; i++) {
+  const mAbs = sAbs + i;
+  …
+  const val = valuationByMonth.get(mAbs) || 0;
+  if (val) { bal += val; rowValuation += val; }
+  bal = (bal + sip) * (1 + monthlyR); // valuation compounds starting this same month
+  …
+}
+```
+`entriesByPeriod` (used only for row-level UI attribution — which row's icon
+references an entry) is unchanged; `valuationByMonth` is a second, separate
+lookup used purely for the maths, so both stay in sync off the same filtered
+`entries` list from `contributionEvents` (still just the active, non-superseded
+valuation per §16).
+
+### Verified
+- A ₹30,000 valuation logged 15 Aug 2026 (goal created May 2026, 12%
+  return, ₹0 SIP): that period's closing balance came out to **₹33,139**
+  (Estimated Growth ₹3,139) — matching `30,000 × 1.01^10` exactly (10
+  compounding months: August itself plus the 9 remaining months of the
+  period), not the old flat ₹30,000.
+- The same amount logged **earlier** in a period compounds to a **higher**
+  total than logged **later** in the period (₹33,805 for a June entry vs.
+  ₹30,603 for an April entry, same ₹30,000, same period) — proving the fix
+  operates at month-level precision, not just at the period boundary.
+- Two valuations logged (₹30,000 in Aug, ₹50,000 in Mar, later one active per
+  §16): closing balance matches `50,000 × 1.01^3` exactly — confirms
+  mid-period compounding and the superseded-valuation exclusion compose
+  correctly together.
+- Row identity (`closing = opening + contribution + growth + valuation`) and
+  `calcGoal.projectedCorpus === last row closingBal` both still hold.
+- Reproduced live in the browser: the Year-by-Year table showed Estimated
+  Growth ₹3,139 and Closing Bal ₹33,139 for the landing period, both
+  underlined, matching the calc-engine test byte-for-byte.
+
 ### Follow-up fix — this introduced a column-alignment bug
 Two things in §12 broke the numeric columns' right-alignment:
 1. `font-bold` on the underlined cells made those numerals **visibly wider**

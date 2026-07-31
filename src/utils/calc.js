@@ -179,10 +179,11 @@ export function activeValuationId(contributions) {
 // Two entry types:
 //   - 'sip'       — permanently shifts the ongoing monthly SIP from that month.
 //   - 'valuation' — a portfolio valuation recorded on a date; its amount is
-//                   added to the CLOSING BALANCE of the period it falls in.
-//                   Only the latest valuation (activeValuationId) is kept —
-//                   superseded ones are dropped here so they never reach the
-//                   simulation or row-attribution logic.
+//                   added to the corpus at that exact month and compounds
+//                   from there onward (see simulate() below). Only the latest
+//                   valuation (activeValuationId) is kept — superseded ones
+//                   are dropped here so they never reach the simulation or
+//                   row-attribution logic.
 // Legacy 'lumpsum' entries (from the previous log model) are read as
 // valuations so no historical data is silently dropped.
 function contributionEvents(goal) {
@@ -221,10 +222,11 @@ function contributionEvents(goal) {
 // base. So a manual SIP increase keeps compounding at the normal step-up rate
 // from then on, exactly like the rest of the SIP.
 //
-// A portfolio valuation is added to the closing balance of the period it
-// falls in (no compounding within that same period — it's a checkpoint, not a
-// mid-period cash flow) and then compounds normally from the next period
-// onward like the rest of the corpus.
+// A portfolio valuation is added to the corpus at the exact month its date
+// falls in, so it starts compounding immediately — for whatever's left of
+// that period, and every period after — exactly like the rest of the corpus.
+// It's added before that month's growth is applied, so it earns a return for
+// the very month it's logged in.
 function simulate(goal, { sipOverride, buildRows = false } = {}) {
   const createdM = goal.createdMonth || CURRENT_MONTH;
   const createdY = goal.createdYear || CURRENT_YEAR;
@@ -241,19 +243,32 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
   const amount = Number(goal.amount) || 0;
   const baseAbs = createdY * 12 + (createdM - 1); // the creation month itself
   const firstAbs = baseAbs + 1;                   // first contribution month
+  const lastValidAbs = firstAbs + totalMonths - 1; // last simulated month
   const startSip = sipOverride !== undefined ? sipOverride : (Number(goal.currentSip) || 0);
   const { sipDeltas, entries } = contributionEvents(goal);
 
   const numPeriods = Math.ceil(totalMonths / 12);
-  // Attribute every logged entry to a period, clamping anything dated before
-  // the first contribution month into period 0 and anything past the target
-  // into the final period, so no entry is ever silently ignored.
+  // Attribute every logged entry to a period — used for per-row UI
+  // attribution (which row's info icon/underline references this entry).
+  // Clamps anything dated before the first contribution month into period 0
+  // and anything past the target into the final period, so no entry is ever
+  // silently ignored.
   const entriesByPeriod = new Map();
   entries.forEach(e => {
     const rel = e.absMonth - firstAbs;
     const k = rel < 0 ? 0 : Math.min(Math.floor(rel / 12), numPeriods - 1);
     if (!entriesByPeriod.has(k)) entriesByPeriod.set(k, []);
     entriesByPeriod.get(k).push(e);
+  });
+
+  // Exact-month lookup for valuations (clamped the same way), so they can be
+  // applied mid-loop and compound from their real date, not just at a period
+  // boundary.
+  const valuationByMonth = new Map();
+  entries.forEach(e => {
+    if (e.type !== 'valuation') return;
+    const mAbs = Math.max(firstAbs, Math.min(e.absMonth, lastValidAbs));
+    valuationByMonth.set(mAbs, (valuationByMonth.get(mAbs) || 0) + e.amount);
   });
 
   let bal = startCorpus;
@@ -272,6 +287,7 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
 
     const openingBal = bal;
     let rowContribution = 0;
+    let rowValuation = 0;
     let firstSipInRow = null;
     let lastSipInRow = null;
     for (let i = 0; i < monthsInRow; i++) {
@@ -283,15 +299,15 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
       const sip = currentSip;
       if (firstSipInRow === null) firstSipInRow = sip;
       lastSipInRow = sip;
+      const val = valuationByMonth.get(mAbs) || 0;
+      if (val) { bal += val; rowValuation += val; }
       bal = (bal + sip) * (1 + monthlyR);
       rowContribution += sip;
       invested += sip;
     }
 
-    // Portfolio valuations land on this period's closing balance.
     const rowEntries = entriesByPeriod.get(k) || [];
-    const valuationInRow = rowEntries.reduce((s, e) => s + (e.type === 'valuation' ? e.amount : 0), 0);
-    if (valuationInRow) bal += valuationInRow;
+    const valuationInRow = rowValuation;
     // When a SIP change lands mid-period, report the post-change rate — that's
     // the figure the UI underlines as "changed", so it must show the new value.
     const sipChangedInRow = rowEntries.some(e => e.type === 'sip');

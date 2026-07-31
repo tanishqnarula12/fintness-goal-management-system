@@ -89,13 +89,19 @@ export default function App() {
     localStorage.setItem('gms:theme', theme);
   }, [theme]);
 
-  // Load clients on startup
+  // Load clients on startup, and again after every save. If a save itself
+  // succeeds but this refresh fails (e.g. a network blip), the screen would
+  // otherwise silently keep showing pre-save numbers with no indication
+  // anything's wrong — so surface it as a dismissible banner instead.
+  const [syncError, setSyncError] = useState(null);
   const loadData = async () => {
     try {
       const data = await getClients();
       setClients(data);
+      setSyncError(null);
     } catch (err) {
       console.error('Failed to load clients:', err);
+      setSyncError('Could not refresh data from the server — the screen may be showing outdated values. Your last change may still have saved; reload the page to check.');
     } finally {
       setLoaded(true);
     }
@@ -347,6 +353,25 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Sync error banner — shown when a post-save data refresh fails, so a
+          transient network blip never leaves stale numbers on screen with no
+          indication anything's wrong. */}
+      {syncError && (
+        <div className="max-w-7xl mx-auto px-6 pt-4">
+          <div className="flex items-start gap-3 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 text-amber-800 dark:text-amber-300 animate-fade-in">
+            <AlertCircle size={18} className="shrink-0 mt-0.5" />
+            <p className="text-sm font-medium flex-1">{syncError}</p>
+            <button
+              onClick={() => setSyncError(null)}
+              className="shrink-0 p-1 rounded-lg text-amber-600 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors cursor-pointer"
+              title="Dismiss"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Container */}
       <main className="max-w-7xl mx-auto px-6 py-8">

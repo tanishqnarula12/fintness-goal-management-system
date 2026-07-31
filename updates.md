@@ -1072,6 +1072,79 @@ valuation per §16).
   Growth ₹3,139 and Closing Bal ₹33,139 for the landing period, both
   underlined, matching the calc-engine test byte-for-byte.
 
+---
+
+## 18. Post-save refresh failures now show a visible banner instead of failing silently
+
+### The report
+A goal's hero card (Additional SIP, Achievement %) appeared stuck showing
+numbers from partway through an earlier editing session — not the final saved
+state. Root cause on this occasion was a *local dev-environment* mistake (an
+`.env.local` left pointed at a placeholder Supabase URL from an earlier test
+run, now fixed) — **the underlying Supabase data was always correct**; the
+browser had just never re-fetched it. But investigating this surfaced a real
+gap: `src/App.jsx`'s `loadData()` swallowed refresh errors silently:
+```js
+const loadData = async () => {
+  try {
+    const data = await getClients();
+    setClients(data);
+  } catch (err) {
+    console.error('Failed to load clients:', err); // no visible feedback
+  } finally {
+    setLoaded(true);
+  }
+};
+```
+Every save handler (`handleUpdateGoal`, `handleAddClient`, etc.) does
+`await updateGoal(...); await loadData();` inside its own try/catch — but
+since `loadData` never re-throws, that outer catch only ever fires if the
+*write* itself fails (and correctly shows an `alert`). If the write succeeds
+but the follow-up refresh fails (a transient network blip, for instance), the
+screen would keep showing pre-save numbers with **zero indication** anything
+was wrong — exactly the symptom reported, and a real bug independent of what
+caused it this time.
+
+### Fix — `src/App.jsx`
+```js
+const [syncError, setSyncError] = useState(null);
+const loadData = async () => {
+  try {
+    const data = await getClients();
+    setClients(data);
+    setSyncError(null);
+  } catch (err) {
+    console.error('Failed to load clients:', err);
+    setSyncError('Could not refresh data from the server — the screen may be showing outdated values. Your last change may still have saved; reload the page to check.');
+  } finally {
+    setLoaded(true);
+  }
+};
+```
+A dismissible amber banner (`AlertCircle` icon, `X` to dismiss) renders right
+below the header whenever `syncError` is set, above `<main>` so it's visible
+regardless of which tab/view is open. It clears itself automatically on the
+next successful load. Write failures still show the existing `alert(...)`
+unchanged — this only covers the previously-silent "write succeeded, refresh
+didn't" case.
+
+### Verified
+Live smoke test against the real database (after restoring `.env.local`):
+normal page load shows **no** banner (confirmed via page text, no false
+positive), and the previously-stale "Financial Freedom" goal now correctly
+shows 100.0% achievement / ₹0/mo additional SIP / green progress bar —
+matching the calc-engine output for its actual saved contributions exactly,
+with no console errors.
+
+### Note on this session's actual root cause
+Not a code bug — I (the assistant) left `.env.local` pointed at a placeholder
+`VITE_SUPABASE_URL` from an earlier test session where I temporarily disabled
+Supabase to verify the growth chart, and forgot to restore it. This is a
+local-machine environment file, gitignored, so it never touched the repo —
+but it meant real reads/writes were unreliable for a window of time on this
+machine specifically. Restored and double-checked against the live database
+before writing this section.
+
 ### Follow-up fix — this introduced a column-alignment bug
 Two things in §12 broke the numeric columns' right-alignment:
 1. `font-bold` on the underlined cells made those numerals **visibly wider**

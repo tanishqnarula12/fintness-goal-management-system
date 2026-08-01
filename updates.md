@@ -1203,6 +1203,107 @@ afterward (data had shifted again by then, from further live editing) showed
 identical ₹22,020/mo, and a screenshot confirmed the modal's preview tiles
 match the Year-by-Year table below it line for line.
 
+---
+
+## 20. "Additional SIP" / "Lump-sum Required" redefined: actionable from TODAY, not retroactive to creation
+
+### The disagreement (their words: "not a bug — a calculation contradiction")
+Even after §19's fix, the number itself still didn't match expectation. The
+old formula solved for a BASE monthly SIP as if it had applied since the
+goal's **creation** date — retroactive, not actionable ("what if you'd
+started differently two years ago?"). What's actually useful to an advisor
+is forward-looking: **"given where things really stand today, what do I need
+to do from here to close the gap?"**
+
+Concretely, with a step-up rate involved, the two framings genuinely diverge
+— proven directly: the per-period gap between a "required" SIP schedule and
+the "current" SIP schedule (both stepping up at the same %) **grows every
+year** rather than staying flat, because step-ups compound on top of
+different bases. For the real goal in question the two answers were
+₹59,786 (old, creation-anchored) vs. a materially different, more useful
+number once re-based to today.
+
+### The fix — `src/utils/calc.js`
+
+**New helper `corpusAsOf(goal, stopAbs)`** — snapshots the corpus and the
+*real, effective ongoing monthly SIP* as of any absolute month, by re-running
+`buildProjection` with that month substituted in as a fake target date. This
+means a valuation or SIP change already logged by that point is fully
+reflected, and anything dated later is correctly excluded (hasn't happened
+yet) — with **zero new simulation logic**, just reusing the existing engine
+with a different target:
+```js
+function corpusAsOf(goal, stopAbs) {
+  const baseAbs = createdY * 12 + (createdM - 1);
+  if (stopAbs <= baseAbs) return { corpus: goalStartingCorpus(goal), sip: Number(goal.currentSip) || 0 };
+  const stopYear = Math.floor(stopAbs / 12), stopMonth = (stopAbs % 12) + 1;
+  const rows = buildProjection({ ...goal, targetMonth: stopMonth, targetYear: stopYear });
+  if (rows.length === 0) return { corpus: goalStartingCorpus(goal), sip: Number(goal.currentSip) || 0 };
+  const last = rows[rows.length - 1];
+  return { corpus: last.closingBal, sip: last.monthlySip };
+}
+```
+
+**`calcGoal`** now computes two conceptually different things, kept
+deliberately separate:
+- **`projectedCorpus` / `achievementPct` / `shortfall`** — unchanged,
+  creation-anchored straight-line forecast: "where does this end up if
+  nothing further changes." Still exactly what the Year-by-Year table and
+  chart show.
+- **`additionalSip` / `sipRequired` / `lumpSumRequired`** — now action items,
+  anchored to `CURRENT_MONTH`/`CURRENT_YEAR` (today):
+  ```js
+  const todayAbs = CURRENT_YEAR * 12 + (CURRENT_MONTH - 1);
+  const targetAbs = tgtY * 12 + (tgtM - 1);
+  const remainingMonths = Math.max(0, targetAbs - todayAbs);
+  const { corpus: todayCorpus, sip: todayEffectiveSip } = corpusAsOf(goal, todayAbs);
+  ```
+  `additionalSip` is found by injecting a **synthetic, today-dated SIP
+  entry** alongside the goal's real logged contributions and binary-searching
+  its amount against `simulate()` — deliberately reusing the exact same
+  engine as every other SIP delta, rather than writing a second, parallel
+  formula that could drift out of sync with it:
+  ```js
+  const todayDate = `${CURRENT_YEAR}-${String(CURRENT_MONTH).padStart(2, '0')}-01`;
+  const withExtra = (extra) => ({ ...goal, contributions: [...goal.contributions, { id: '__extraSip', type: 'sip', date: todayDate, amount: extra }] });
+  // binary search `extra` against simulate(withExtra(extra)).closingBal
+  ```
+  `sipRequired = todayEffectiveSip + additionalSip` (the total ongoing SIP
+  needed, effective today — replaces the old "BASE SIP from creation"
+  meaning). `lumpSumRequired` similarly switched from
+  `futureValue/(1+r)^months − startCorpus` (creation-anchored, and — a
+  pre-existing gap — never even looked at logged contributions) to
+  `futureValue/(1+r)^remainingMonths − todayCorpus`, so a logged valuation
+  now correctly reduces how much additional lump sum is needed too.
+- **`startCorpus`** keeps its original meaning (`currentInv + mappedAssets`
+  only — "what you started this goal with"), unaffected by this change; the
+  new `todayCorpus`/`todayEffectiveSip` are separate fields for "what's real,
+  right now."
+
+### UI — `src/components/GoalDetail.jsx`
+Added a breakdown line directly under the existing "Includes logged
+contributions" note, whenever `c.hasContributions`, spelling out the
+relationship explicitly instead of leaving a single number to interpret in
+isolation:
+> Current effective SIP (incl. log) **₹1,42,000/mo** + additional
+> **₹13,498/mo** = **₹1,55,498/mo** needed from today forward
+
+### Verified
+- Plugging `additionalSip` back in as a today-dated top-up (exactly mirroring
+  how it was derived) lands the projection's closing balance on `futureValue`
+  to the rupee — confirmed via `buildProjection`, not just the binary search's
+  own convergence.
+- No-contributions, goal-already-past-target, and heavily-overfunded edge
+  cases all produce finite, sane results (no `NaN`/crashes) — `additionalSip`
+  correctly floors at 0 when already on track or when no time remains.
+- A batch of varied synthetic scenarios (different step-up rates, negative
+  SIP deltas, valuations) all computed cleanly.
+- Live browser test against the real, actively-being-edited goal: the hero
+  card and the new breakdown line rendered exactly as designed, with the
+  three numbers (current effective SIP + additional = total required) adding
+  up correctly and matching a fresh independent calc-engine run for the same
+  data snapshot.
+
 ### Follow-up fix — this introduced a column-alignment bug
 Two things in §12 broke the numeric columns' right-alignment:
 1. `font-bold` on the underlined cells made those numerals **visibly wider**

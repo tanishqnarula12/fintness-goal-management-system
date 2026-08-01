@@ -143,6 +143,13 @@ export default function GoalDetail({ goal, clientName, onBack, onEdit, onSaveCon
                   : `Includes ${fmtINR(c.startCorpus - (Number(goal.currentInv) || 0))} of mapped assets in the starting corpus.`}
             </p>
           )}
+          {c.hasContributions && (
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-medium">
+              Current effective SIP (incl. log) <span className="font-bold text-slate-700 dark:text-slate-200 tabular-nums">{fmtSip(c.todayEffectiveSip)}/mo</span>
+              {' + additional '}<span className="font-bold text-slate-700 dark:text-slate-200 tabular-nums">{fmtSip(c.additionalSip)}/mo</span>
+              {' = '}<span className="font-bold text-slate-900 dark:text-white tabular-nums">{fmtSip(c.sipRequired)}/mo</span> needed from today forward
+            </p>
+          )}
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 pt-6 border-t border-slate-200 dark:border-slate-800 text-xs">

@@ -344,6 +344,27 @@ function simulate(goal, { sipOverride, buildRows = false } = {}) {
   return { rows: rows || [], closingBal: bal };
 }
 
+// Snapshots a goal's corpus and effective ongoing monthly SIP "as of" a given
+// absolute month — by re-running the exact same simulation engine with that
+// month treated as the target, so a logged valuation or SIP change that has
+// already happened by then is fully reflected, and anything dated after is
+// correctly excluded (it hasn't happened yet). Reuses buildProjection (which
+// itself reuses simulate) — no parallel logic to drift out of sync.
+function corpusAsOf(goal, stopAbs) {
+  const createdM = goal.createdMonth || CURRENT_MONTH;
+  const createdY = goal.createdYear || CURRENT_YEAR;
+  const baseAbs = createdY * 12 + (createdM - 1);
+  if (stopAbs <= baseAbs) {
+    return { corpus: goalStartingCorpus(goal), sip: Number(goal.currentSip) || 0 };
+  }
+  const stopYear = Math.floor(stopAbs / 12);
+  const stopMonth = (stopAbs % 12) + 1;
+  const rows = buildProjection({ ...goal, targetMonth: stopMonth, targetYear: stopYear });
+  if (rows.length === 0) return { corpus: goalStartingCorpus(goal), sip: Number(goal.currentSip) || 0 };
+  const last = rows[rows.length - 1];
+  return { corpus: last.closingBal, sip: last.monthlySip };
+}
+
 export function calcGoal(goal) {
   const createdM = goal.createdMonth || CURRENT_MONTH;
   const createdY = goal.createdYear || CURRENT_YEAR;
@@ -356,50 +377,68 @@ export function calcGoal(goal) {
   const monthlyInfl = Math.pow(1 + inflation, 1 / 12) - 1;
   const futureValue = amount * Math.pow(1 + monthlyInfl, months);
 
-  // Projected corpus = same month-by-month simulation the projection table
-  // uses, so the summary tiles and the table always agree exactly.
+  // Straight-line forecast: where the goal ends up if nothing further
+  // changes beyond what's already configured/logged. Creation-anchored —
+  // this is "what happens if I do nothing more", not an action item.
   const projectedCorpus = simulate(goal).closingBal;
   const shortfall = Math.max(0, futureValue - projectedCorpus);
   const achievementPct = futureValue > 0 ? Math.min(100, (projectedCorpus / futureValue) * 100) : 100;
 
-  // sipRequired solves for the BASE monthly SIP (i.e. what "Current Monthly
-  // SIP Allocation" would need to be) that hits the target, holding all
-  // logged Create Log contributions (lump sums + SIP deltas) fixed.
-  let sipRequired = 0;
-  if (months > 0 && futureValue > 0) {
-    const zeroSipClosing = simulate(goal, { sipOverride: 0 }).closingBal;
-    if (futureValue > zeroSipClosing) {
+  // Additional SIP / Lump-sum Required are ACTION items: "given where things
+  // really stand today, what do I need to do from here forward?" — anchored
+  // to today's real date, not retroactively to the goal's creation. Both
+  // start from today's real corpus and real ongoing SIP (which already fully
+  // reflect every past Create Log entry) and only need to close the
+  // remaining gap over the remaining time to target.
+  const monthlyR = (Number(goal.expectedReturn) || 0) / 100 / 12;
+  const todayAbs = CURRENT_YEAR * 12 + (CURRENT_MONTH - 1);
+  const targetAbs = tgtY * 12 + (tgtM - 1);
+  const remainingMonths = Math.max(0, targetAbs - todayAbs);
+  const { corpus: todayCorpus, sip: todayEffectiveSip } = corpusAsOf(goal, todayAbs);
+
+  // additionalSip solves for a flat top-up, effective from today, on top of
+  // whatever's already happening (today's real ongoing SIP, plus any
+  // future-dated Create Log entries, which still apply as scheduled). Found
+  // by injecting a synthetic "today-dated" SIP entry alongside the goal's
+  // real logged contributions and searching its amount — reuses the exact
+  // same simulate() engine as everywhere else, so there's no separate,
+  // possibly-drifting formula for this.
+  let additionalSip = 0;
+  if (remainingMonths > 0 && futureValue > 0) {
+    const todayDate = `${CURRENT_YEAR}-${String(CURRENT_MONTH).padStart(2, '0')}-01`;
+    const withExtra = (extra) => ({
+      ...goal,
+      contributions: [...(Array.isArray(goal.contributions) ? goal.contributions : []), { id: '__extraSip', type: 'sip', date: todayDate, amount: extra }],
+    });
+    const zeroExtraClosing = simulate(withExtra(0)).closingBal;
+    if (futureValue > zeroExtraClosing) {
       let lo = 0;
       let hi = Math.max(futureValue, 1);
-      while (simulate(goal, { sipOverride: hi }).closingBal < futureValue) {
+      while (simulate(withExtra(hi)).closingBal < futureValue) {
         hi *= 2;
         if (hi > 1e15) break;
       }
       for (let i = 0; i < 60; i++) {
         const mid = (lo + hi) / 2;
-        if (simulate(goal, { sipOverride: mid }).closingBal < futureValue) lo = mid; else hi = mid;
+        if (simulate(withExtra(mid)).closingBal < futureValue) lo = mid; else hi = mid;
       }
-      sipRequired = (lo + hi) / 2;
+      additionalSip = (lo + hi) / 2;
     }
   }
+  const sipRequired = todayEffectiveSip + additionalSip; // total ongoing SIP needed, effective today
+  const sipOnTrack = additionalSip <= 0.5;
 
-  // Lump-sum equivalent: how much would need to be invested as a one-time
-  // top-up, on top of the starting corpus, to hit the future value on its own.
+  // Lump-sum equivalent: a one-time top-up, invested today on top of today's
+  // real corpus, that alone (with no further SIP) would hit the future value.
+  const lumpSumRequired = remainingMonths > 0
+    ? Math.max(0, futureValue / Math.pow(1 + monthlyR, remainingMonths) - todayCorpus)
+    : Math.max(0, futureValue - todayCorpus);
+
   const startCorpus = goalStartingCorpus(goal);
-  const monthlyR = (Number(goal.expectedReturn) || 0) / 100 / 12;
-  const lumpSumRequired = months > 0
-    ? Math.max(0, futureValue / Math.pow(1 + monthlyR, months) - startCorpus)
-    : Math.max(0, futureValue - startCorpus);
-
-  // Signed difference: positive => more SIP needed, negative => over-funded
-  const currentSip = Number(goal.currentSip) || 0;
-  const additionalSip = sipRequired - currentSip;
-  const sipOnTrack = currentSip >= sipRequired - 0.5;
-
   const hasContributions = Array.isArray(goal.contributions) && goal.contributions.length > 0;
   const hasMappedAssets = Array.isArray(goal.mappedAssets) && goal.mappedAssets.length > 0;
 
-  return { months, years, futureValue, projectedCorpus, shortfall, achievementPct, sipRequired, additionalSip, sipOnTrack, lumpSumRequired, startCorpus, hasContributions, hasMappedAssets };
+  return { months, years, futureValue, projectedCorpus, shortfall, achievementPct, sipRequired, additionalSip, sipOnTrack, lumpSumRequired, startCorpus, todayCorpus, todayEffectiveSip, hasContributions, hasMappedAssets };
 }
 
 // Year-by-year projection where each row is a 12-month window anchored to the
